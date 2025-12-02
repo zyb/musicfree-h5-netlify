@@ -191,7 +191,7 @@ type PluginHostContext = {
   descriptor: InstalledPlugin
 }
 
-// 检测是否为生产环境 (Vercel)
+// 检测是否为生产环境 (Netlify)
 const isProduction = (import.meta as unknown as { env: { PROD: boolean } }).env.PROD
 const PROXY_PREFIX = isProduction ? '/api/proxy' : '/proxy'
 
