@@ -1,0 +1,10 @@
+# Ignore unnecessary files for Vercel deployment
+node_modules
+.git
+.gitignore
+*.md
+!README.md
+test-plugin.mjs
+Dockerfile
+nginx.conf
+

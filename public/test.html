@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>插件测试</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a2e; color: #eee; }
+    button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+    pre { background: #0f0f1a; padding: 15px; overflow: auto; max-height: 400px; }
+    .error { color: #ff6b6b; }
+    .success { color: #51cf66; }
+    input { padding: 10px; width: 300px; }
+  </style>
+</head>
+<body>
+  <h1>MusicFree H5 插件测试</h1>
+  
+  <div>
+    <button onclick="testProxy()">1. 测试代理</button>
+    <button onclick="loadPlugin()">2. 加载插件</button>
+    <button onclick="testSearch()">3. 测试搜索</button>
+    <button onclick="testPlay()">4. 测试播放</button>
+  </div>
+  
+  <div style="margin: 20px 0;">
+    <input type="text" id="query" value="周杰伦" placeholder="搜索关键词">
+  </div>
+  
+  <pre id="log"></pre>
+
+<script>
+const log = (msg, type = '') => {
+  const el = document.getElementById('log')
+  const cls = type === 'error' ? 'error' : type === 'success' ? 'success' : ''
+  el.innerHTML += `<span class="${cls}">${new Date().toLocaleTimeString()} ${msg}</span>\n`
+  el.scrollTop = el.scrollHeight
+}
+
+let pluginInstance = null
+
+// 测试代理
+async function testProxy() {
+  log('=== 测试代理 ===')
+  
+  try {
+    log('请求: POST /proxy/qq/cgi-bin/musicu.fcg')
+    const res = await fetch('/proxy/qq/cgi-bin/musicu.fcg', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        req_1: {
+          method: 'DoSearchForQQMusicDesktop',
+          module: 'music.search.SearchCgiService',
+          param: { num_per_page: 5, page_num: 1, query: '周杰伦', search_type: 0 }
+        }
+      })
+    })
+    
+    log(`响应状态: ${res.status}`)
+    const data = await res.json()
+    log(`响应 code: ${data.code}`)
+    
+    if (data.req_1?.data?.body?.song?.list) {
+      const songs = data.req_1.data.body.song.list
+      log(`找到 ${songs.length} 首歌曲`, 'success')
+      songs.slice(0, 3).forEach((s, i) => {
+        log(`  ${i+1}. ${s.title} - ${s.singer?.map(x=>x.name).join(', ')}`)
+      })
+    } else {
+      log('未找到歌曲数据', 'error')
+      log('响应内容: ' + JSON.stringify(data).substring(0, 500))
+    }
+  } catch (err) {
+    log('代理测试失败: ' + err.message, 'error')
+  }
+}
+
+// 加载插件
+async function loadPlugin() {
+  log('=== 加载插件 ===')
+  
+  const pluginUrl = 'http://music.haitangw.net/cqapi/qq.js'
+  
+  // 尝试多个代理
+  const proxies = [
+    url => `/proxy/haitangm/cqapi/qq.js`,  // 使用本地代理
+    url => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  ]
+  
+  let code = null
+  for (const proxy of proxies) {
+    const proxyUrl = proxy(pluginUrl)
+    log(`尝试: ${proxyUrl.substring(0, 80)}...`)
+    try {
+      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) })
+      if (res.ok) {
+        code = await res.text()
+        log(`下载成功, 代码长度: ${code.length}`, 'success')
+        break
+      }
+    } catch (err) {
+      log(`失败: ${err.message}`, 'error')
+    }
+  }
+  
+  if (!code) {
+    log('所有代理都失败了', 'error')
+    return
+  }
+  
+  // 创建 require shim
+  const createAxiosShim = () => {
+    const request = async (config) => {
+      let url = config.url || ''
+      if (config.baseURL && !url.startsWith('http')) {
+        url = config.baseURL.replace(/\/$/, '') + '/' + url.replace(/^\//, '')
+      }
+      if (config.params) {
+        url += (url.includes('?') ? '&' : '?') + new URLSearchParams(config.params).toString()
+      }
+      
+      // 重写 URL 使用本地代理
+      let proxyUrl = url
+      if (url.includes('u.y.qq.com')) {
+        proxyUrl = url.replace(/^https?:\/\/u\.y\.qq\.com\//, '/proxy/qq/')
+      } else if (url.includes('c.y.qq.com')) {
+        proxyUrl = url.replace(/^https?:\/\/c\.y\.qq\.com\//, '/proxy/qqc/')
+      } else if (url.includes('i.y.qq.com')) {
+        proxyUrl = url.replace(/^https?:\/\/i\.y\.qq\.com\//, '/proxy/qqi/')
+      } else if (url.includes('musicapi.haitangw.net')) {
+        proxyUrl = url.replace(/^https?:\/\/musicapi\.haitangw\.net\//, '/proxy/haitang/')
+      } else if (url.includes('music.haitangw.net')) {
+        proxyUrl = url.replace(/^https?:\/\/music\.haitangw\.net\//, '/proxy/haitangm/')
+      } else if (url.includes('musicapi.haitangw.net')) {
+        proxyUrl = url.replace(/^https?:\/\/musicapi\.haitangw\.net\//, '/proxy/haitang/')
+      } else if (url.includes('music.haitangw.net')) {
+        proxyUrl = url.replace(/^https?:\/\/music\.haitangw\.net\//, '/proxy/haitangw/')
+      } else if (url.includes('musicapi.haitangw.net')) {
+        proxyUrl = url.replace(/^https?:\/\/musicapi\.haitangw\.net\//, '/proxy/haitang/')
+      } else if (url.includes('music.haitangw.net')) {
+        proxyUrl = url.replace(/^https?:\/\/music\.haitangw\.net\//, '/proxy/haitangw/')
+      } else if (url.includes('musicapi.haitangw.net')) {
+        proxyUrl = url.replace(/^https?:\/\/musicapi\.haitangw\.net\//, '/proxy/haitang/')
+      } else if (url.includes('music.haitangw.net')) {
+        proxyUrl = url.replace(/^https?:\/\/music\.haitangw\.net\//, '/proxy/haitang2/')
+      }
+      
+      log(`axios请求: ${config.method || 'GET'} ${url}`)
+      log(`代理URL: ${proxyUrl}`)
+      
+      const init = {
+        method: config.method?.toUpperCase() || 'GET',
+        headers: config.headers || {},
+      }
+      
+      if (config.data && init.method !== 'GET') {
+        init.body = typeof config.data === 'string' ? config.data : JSON.stringify(config.data)
+        init.headers['Content-Type'] = 'application/json'
+      }
+      
+      const res = await fetch(proxyUrl, init)
+      const text = await res.text()
+      let data
+      try { data = JSON.parse(text) } catch { data = text }
+      
+      log(`响应: ${res.status}, 数据类型: ${typeof data}`)
+      
+      return { data, status: res.status, headers: {} }
+    }
+    
+    const axios = async (urlOrConfig, config) => {
+      if (typeof urlOrConfig === 'string') return request({ ...config, url: urlOrConfig })
+      return request(urlOrConfig)
+    }
+    axios.get = (url, config) => request({ ...config, url, method: 'GET' })
+    axios.post = (url, data, config) => request({ ...config, url, method: 'POST', data })
+    axios.default = axios
+    axios.defaults = { headers: { common: {} } }
+    return axios
+  }
+  
+  const createCryptoShim = () => {
+    const createWA = (bytes) => ({
+      _bytes: bytes,
+      toString(enc) { return enc?.stringify ? enc.stringify(this) : '' }
+    })
+    return {
+      enc: {
+        Utf8: {
+          parse: (s) => createWA(new TextEncoder().encode(s)),
+          stringify: (wa) => new TextDecoder().decode(wa._bytes || new Uint8Array(0))
+        },
+        Base64: {
+          parse: (s) => { try { return createWA(Uint8Array.from(atob(s), c => c.charCodeAt(0))) } catch { return createWA(new Uint8Array(0)) } },
+          stringify: (wa) => btoa(String.fromCharCode(...(wa._bytes || [])))
+        },
+        Hex: {
+          stringify: (wa) => Array.from(wa._bytes || []).map(b => b.toString(16).padStart(2, '0')).join(''),
+          parse: (h) => createWA(new Uint8Array((h.match(/.{1,2}/g) || []).map(b => parseInt(b, 16))))
+        }
+      },
+      MD5: (s) => createWA(new TextEncoder().encode(s))
+    }
+  }
+  
+  const he = {
+    decode: (s) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)),
+    encode: (s) => s
+  }
+  
+  const modules = {
+    'axios': createAxiosShim(),
+    'crypto-js': createCryptoShim(),
+    'he': he,
+    'qs': { stringify: o => new URLSearchParams(o).toString(), parse: s => Object.fromEntries(new URLSearchParams(s)) }
+  }
+  
+  const require = (name) => {
+    if (modules[name]) return modules[name]
+    log(`模块未实现: ${name}`, 'error')
+    return {}
+  }
+  
+  // 执行插件
+  log('执行插件代码...')
+  try {
+    const module = { exports: {} }
+    const fn = new Function('module', 'exports', 'require', code)
+    fn(module, module.exports, require)
+    
+    log(`导出: ${Object.keys(module.exports).join(', ')}`, 'success')
+    log(`平台: ${module.exports.platform}`)
+    
+    if (module.exports.search) {
+      pluginInstance = module.exports
+      log('插件加载成功!', 'success')
+    } else {
+      log('插件没有 search 方法', 'error')
+    }
+  } catch (err) {
+    log('执行插件失败: ' + err.message, 'error')
+    log(err.stack)
+  }
+}
+
+// 测试搜索
+async function testSearch() {
+  log('=== 测试搜索 ===')
+  
+  if (!pluginInstance) {
+    log('请先加载插件', 'error')
+    return
+  }
+  
+  const query = document.getElementById('query').value
+  log(`搜索: ${query}`)
+  
+  try {
+    const result = await pluginInstance.search(query, 1, 'music')
+    log(`搜索完成, isEnd: ${result.isEnd}`)
+    log(`找到 ${result.data?.length || 0} 首歌曲`, result.data?.length ? 'success' : 'error')
+    
+    if (result.data?.length) {
+      searchResults = result.data
+      result.data.slice(0, 5).forEach((song, i) => {
+        log(`  ${i+1}. ${song.title} - ${song.artist}`)
+      })
+    } else {
+      log('返回数据: ' + JSON.stringify(result).substring(0, 500))
+    }
+  } catch (err) {
+    log('搜索失败: ' + err.message, 'error')
+    log(err.stack)
+  }
+}
+
+let searchResults = []
+
+// 测试播放
+async function testPlay() {
+  log('=== 测试播放 ===')
+  
+  if (!pluginInstance) {
+    log('请先加载插件', 'error')
+    return
+  }
+  
+  if (!searchResults.length) {
+    log('请先搜索歌曲', 'error')
+    return
+  }
+  
+  const song = searchResults[0]
+  log(`尝试播放: ${song.title} - ${song.artist}`)
+  log(`歌曲信息: id=${song.id}, songmid=${song.songmid}`)
+  
+  if (!pluginInstance.getMediaSource) {
+    log('插件没有 getMediaSource 方法', 'error')
+    return
+  }
+  
+  const qualities = ['128', 'standard', '320', 'high', 'low']
+  for (const quality of qualities) {
+    try {
+      log(`尝试质量: ${quality}`)
+      const result = await pluginInstance.getMediaSource(song, quality)
+      log(`结果: ${JSON.stringify(result)}`)
+      
+      if (result?.url) {
+        log(`成功获取播放地址: ${result.url}`, 'success')
+        
+        // 尝试播放
+        const audio = new Audio(result.url)
+        audio.volume = 0.5
+        audio.play().then(() => {
+          log('开始播放!', 'success')
+        }).catch(err => {
+          log('播放失败: ' + err.message, 'error')
+        })
+        
+        return
+      }
+    } catch (err) {
+      log(`质量 ${quality} 失败: ${err.message}`, 'error')
+    }
+  }
+  
+  log('所有质量都失败了', 'error')
+}
+</script>
+</body>
+</html>
+

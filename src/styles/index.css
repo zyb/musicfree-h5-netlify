@@ -1,0 +1,193 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-primary: #ed741e;
+  --color-surface: #0f172a;
+  --color-surface-elevated: #1e293b;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  font-family: 'DM Sans', system-ui, sans-serif;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+  color: #f1f5f9;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: hidden;
+}
+
+/* 自定义滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.3);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.5);
+}
+
+/* 输入框样式 */
+input, textarea {
+  font-family: inherit;
+}
+
+input:focus, textarea:focus, button:focus {
+  outline: none;
+}
+
+/* 按钮基础样式 */
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* 玻璃态效果 */
+.glass {
+  background: rgba(30, 41, 59, 0.7);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.glass-light {
+  background: rgba(241, 245, 249, 0.05);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+/* 唱片旋转动画 */
+.vinyl-spin {
+  animation: spin 12s linear infinite;
+  animation-play-state: paused;
+}
+
+.vinyl-spin.playing {
+  animation-play-state: running;
+}
+
+/* 音波动画 */
+.wave-bar {
+  animation: wave 1.2s ease-in-out infinite;
+}
+
+.wave-bar:nth-child(2) {
+  animation-delay: 0.1s;
+}
+
+.wave-bar:nth-child(3) {
+  animation-delay: 0.2s;
+}
+
+.wave-bar:nth-child(4) {
+  animation-delay: 0.3s;
+}
+
+.wave-bar:nth-child(5) {
+  animation-delay: 0.4s;
+}
+
+/* 进度条样式 */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-track {
+  height: 4px;
+  background: rgba(148, 163, 184, 0.2);
+  border-radius: 2px;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  background: var(--color-primary);
+  border-radius: 50%;
+  margin-top: -5px;
+  box-shadow: 0 2px 8px rgba(237, 116, 30, 0.4);
+  transition: transform 0.15s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  background: rgba(148, 163, 184, 0.2);
+  border-radius: 2px;
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: var(--color-primary);
+  border-radius: 50%;
+  border: none;
+  box-shadow: 0 2px 8px rgba(237, 116, 30, 0.4);
+}
+
+/* 动画延迟类 */
+.delay-100 { animation-delay: 100ms; }
+.delay-200 { animation-delay: 200ms; }
+.delay-300 { animation-delay: 300ms; }
+.delay-400 { animation-delay: 400ms; }
+.delay-500 { animation-delay: 500ms; }
+
+/* 文字渐变 */
+.text-gradient {
+  background: linear-gradient(135deg, #f19042 0%, #ed741e 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* 悬浮光晕效果 */
+.glow-hover {
+  transition: box-shadow 0.3s ease;
+}
+
+.glow-hover:hover {
+  box-shadow: 0 0 30px rgba(237, 116, 30, 0.3);
+}
+
+/* 网格背景 */
+.grid-bg {
+  background-image: 
+    linear-gradient(rgba(148, 163, 184, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.03) 1px, transparent 1px);
+  background-size: 50px 50px;
+}
+
