@@ -415,6 +415,11 @@ export const getLyricFromCache = (trackId: string): string | undefined => {
   return lyricCache.get(trackId)
 }
 
+// 导出 lyricCache 供调试使用（仅在开发环境）
+if (typeof window !== 'undefined') {
+  (window as any).lyricCache = lyricCache
+}
+
 // 创建 axios 兼容的模拟实现
 const createAxiosShim = (_proxiedFetch: typeof fetch) => {
   const processResponse = async (response: Response, requestUrl?: string) => {
@@ -435,6 +440,23 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
     // 拦截 qq_song_kw.php 请求，提取歌词
     if (requestUrl && requestUrl.includes('qq_song_kw.php')) {
       console.log('[歌词调试] 检测到 qq_song_kw.php 请求，检查响应数据')
+      console.log('[歌词调试] 请求 URL:', requestUrl)
+      
+      // 从 URL 中提取 id 参数
+      let urlId: string | undefined
+      try {
+        const urlObj = new URL(requestUrl, 'http://dummy.com')
+        urlId = urlObj.searchParams.get('id') || undefined
+        console.log('[歌词调试] 从 URL 中提取的 id:', urlId)
+      } catch (e) {
+        // 如果 URL 解析失败，尝试手动提取
+        const match = requestUrl.match(/[?&]id=([^&]+)/)
+        if (match) {
+          urlId = match[1]
+          console.log('[歌词调试] 从 URL 中手动提取的 id:', urlId)
+        }
+      }
+      
       console.log('[歌词调试] 响应数据类型:', typeof data, '是否为对象:', typeof data === 'object', '是否有 data 字段:', data && typeof data === 'object' && 'data' in data)
       
       if (data && typeof data === 'object' && 'data' in data) {
@@ -462,19 +484,29 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
         })
         
         if (responseData.data?.lrc && typeof responseData.data.lrc === 'string') {
-          const trackId = responseData.data.rid || ''
+          // 优先使用响应中的 rid，如果没有则使用 URL 中的 id
+          const trackId = responseData.data.rid || urlId || ''
           if (trackId) {
             console.log('[歌词调试] 从 qq_song_kw.php 响应中提取到歌词，trackId:', trackId, '歌词长度:', responseData.data.lrc.length, '歌词预览:', responseData.data.lrc.substring(0, 100))
+            // 使用多个 key 保存歌词，确保能找到
             lyricCache.set(String(trackId), responseData.data.lrc)
+            if (urlId && urlId !== trackId) {
+              lyricCache.set(String(urlId), responseData.data.lrc)
+            }
             // 触发全局事件，通知 App.tsx 更新歌词
             if (typeof window !== 'undefined') {
-              console.log('[歌词调试] 触发 lyricUpdated 事件，trackId:', trackId)
+              console.log('[歌词调试] 触发 lyricUpdated 事件，trackId:', trackId, 'urlId:', urlId)
               window.dispatchEvent(new CustomEvent('lyricUpdated', { 
-                detail: { trackId: String(trackId), lrc: responseData.data.lrc, rid: String(trackId) } 
+                detail: { 
+                  trackId: String(trackId), 
+                  lrc: responseData.data.lrc, 
+                  rid: String(trackId),
+                  urlId: urlId ? String(urlId) : undefined,
+                } 
               }))
             }
           } else {
-            console.warn('[歌词调试] 响应中有歌词但没有 rid 字段')
+            console.warn('[歌词调试] 响应中有歌词但没有 rid 或 id 字段')
           }
         } else {
           console.log('[歌词调试] 响应中没有 lrc 字段或 lrc 不是字符串')

@@ -203,14 +203,23 @@ function App() {
       // 如果 extra 中没有 lrc，尝试从缓存中获取
       if (!lrcText) {
         // 尝试多个可能的 trackId：rid、id、以及它们的字符串形式
+        // 还要尝试从 extra 中查找可能的 QQ 音乐 ID
         const possibleIds = [
           extra?.rid,
           currentTrack.id,
           String(extra?.rid || ''),
           String(currentTrack.id),
+          // 尝试从 extra 中查找可能的 songmid 或其他 ID 字段
+          (extra as any)?.songmid,
+          String((extra as any)?.songmid || ''),
         ].filter(Boolean) as string[]
         
         console.log('[歌词调试] 尝试从缓存获取歌词，可能的 trackId:', possibleIds)
+        // 通过 window 访问 lyricCache（仅在开发环境）
+        const globalCache = (window as any).lyricCache as Map<string, string> | undefined
+        if (globalCache) {
+          console.log('[歌词调试] 缓存中的所有 key:', Array.from(globalCache.keys()))
+        }
         
         for (const trackId of possibleIds) {
           lrcText = getLyricFromCache(trackId)
@@ -218,8 +227,11 @@ function App() {
             console.log('[歌词调试] 从缓存中找到歌词，使用的 trackId:', trackId, '歌词长度:', lrcText.length)
             // 保存到 track.extra 中，同时保存 rid（如果找到了）
             const updateData: { lrc: string; rid?: string } = { lrc: lrcText }
-            if (extra?.rid || trackId === extra?.rid || trackId === String(extra?.rid)) {
-              updateData.rid = extra?.rid || trackId
+            // 如果 trackId 看起来像 QQ 音乐的 ID（以 00 开头），保存为 rid
+            if (trackId && trackId.startsWith('00')) {
+              updateData.rid = trackId
+            } else if (extra?.rid) {
+              updateData.rid = extra.rid
             }
             updateCurrentTrackExtra(updateData)
             break
@@ -227,7 +239,26 @@ function App() {
         }
         
         if (!lrcText) {
-          console.log('[歌词调试] 缓存中也没有找到歌词')
+          console.log('[歌词调试] 缓存中也没有找到歌词，尝试遍历所有缓存项')
+          // 如果还是没找到，尝试遍历所有缓存项（作为最后的尝试）
+          // 通过 window 访问 lyricCache（仅在开发环境）
+          const globalCache = (window as any).lyricCache as Map<string, string> | undefined
+          if (globalCache) {
+            for (const [cachedId, cachedLrc] of globalCache.entries()) {
+              console.log('[歌词调试] 检查缓存项:', cachedId)
+              // 如果缓存中有任何歌词，就使用它（可能是最近的请求）
+              if (cachedLrc && cachedLrc.length > 0) {
+                console.log('[歌词调试] 使用缓存中的歌词（可能是最近的请求）:', cachedId)
+                lrcText = cachedLrc
+                const updateData: { lrc: string; rid?: string } = { lrc: lrcText }
+                if (cachedId.startsWith('00')) {
+                  updateData.rid = cachedId
+                }
+                updateCurrentTrackExtra(updateData)
+                break
+              }
+            }
+          }
         }
       }
       
@@ -263,7 +294,7 @@ function App() {
 
   // 监听歌词更新事件
   useEffect(() => {
-    const handleLyricUpdated = (event: CustomEvent<{ trackId: string; lrc: string; rid?: string }>) => {
+    const handleLyricUpdated = (event: CustomEvent<{ trackId: string; lrc: string; rid?: string; urlId?: string }>) => {
       console.log('[歌词调试] 收到歌词更新事件:', event.detail)
       if (!currentTrack) {
         console.log('[歌词调试] 当前没有播放歌曲，忽略歌词更新事件')
@@ -275,20 +306,26 @@ function App() {
       const currentId = currentTrack.id
       const eventTrackId = event.detail.trackId
       const eventRid = event.detail.rid || event.detail.trackId
+      const eventUrlId = event.detail.urlId
       
       console.log('[歌词调试] 匹配检查:', {
         currentId,
         currentRid,
         eventTrackId,
         eventRid,
-        idMatch: currentId === eventTrackId || currentId === eventRid,
-        ridMatch: currentRid === eventTrackId || currentRid === eventRid,
+        eventUrlId,
+        idMatch: currentId === eventTrackId || currentId === eventRid || currentId === eventUrlId,
+        ridMatch: currentRid === eventTrackId || currentRid === eventRid || currentRid === eventUrlId,
       })
       
-      // 匹配逻辑：id 或 rid 任一匹配即可
-      if (currentId === eventTrackId || currentId === eventRid || 
-          currentRid === eventTrackId || currentRid === eventRid) {
-        console.log('[歌词调试] 歌词更新事件匹配当前歌曲，更新歌词')
+      // 匹配逻辑：如果当前正在解析流（没有 currentStream），或者 id/rid 任一匹配，就接受歌词
+      // 这样可以处理解析流时的情况，即使 ID 不完全匹配
+      const isResolvingStream = !currentStream
+      const idMatches = currentId === eventTrackId || currentId === eventRid || currentId === eventUrlId
+      const ridMatches = currentRid === eventTrackId || currentRid === eventRid || currentRid === eventUrlId
+      
+      if (isResolvingStream || idMatches || ridMatches) {
+        console.log('[歌词调试] 歌词更新事件匹配当前歌曲，更新歌词', { isResolvingStream, idMatches, ridMatches })
         // 同时更新 lrc 和 rid（如果事件中有 rid）
         const updateData: { lrc: string; rid?: string } = { lrc: event.detail.lrc }
         if (eventRid) {
@@ -306,7 +343,7 @@ function App() {
     return () => {
       window.removeEventListener('lyricUpdated', handleLyricUpdated as EventListener)
     }
-  }, [currentTrack, updateCurrentTrackExtra, fetchLyrics])
+  }, [currentTrack, currentStream, updateCurrentTrackExtra, fetchLyrics])
 
   // 当 currentTrack 改变时解析流和获取歌词
   useEffect(() => {
