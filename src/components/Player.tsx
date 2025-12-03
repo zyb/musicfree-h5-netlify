@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
+import { useEffect, useRef, useCallback, useMemo } from 'react'
 import { motion } from 'framer-motion'
 import { 
   ChevronDown, 
@@ -63,7 +63,6 @@ export function Player({ onClose, onSeek }: PlayerProps) {
     playPrevious,
   } = usePlayerStore()
 
-  const [showLyricsOnly, setShowLyricsOnly] = useState(false)
   const lyricContainerRef = useRef<HTMLDivElement>(null)
   const userScrollingRef = useRef(false) // 用户是否正在滚动
   const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null) // 滚动超时定时器
@@ -163,20 +162,6 @@ export function Player({ onClose, onSeek }: PlayerProps) {
     }
   }, [lyrics, onSeek, scrollToLyric])
 
-  // 当切换到仅歌词模式时，自动定位到当前歌词
-  useEffect(() => {
-    if (showLyricsOnly && lyrics.length > 0 && currentLyricIndex >= 0) {
-      // 延迟一下确保DOM已渲染
-      const timer = setTimeout(() => {
-        if (lyricContainerRef.current && !userScrollingRef.current) {
-          scrollToLyric(currentLyricIndex, 'smooth')
-          lastAutoScrollIndexRef.current = currentLyricIndex
-          userScrollingRef.current = false // 重置滚动标志
-        }
-      }, 150)
-      return () => clearTimeout(timer)
-    }
-  }, [showLyricsOnly, lyrics.length, currentLyricIndex, scrollToLyric])
 
   // 当歌词加载完成时，自动定位到当前歌词
   useEffect(() => {
@@ -311,112 +296,39 @@ export function Player({ onClose, onSeek }: PlayerProps) {
         <div className="w-10" />
       </header>
       
-      {/* 封面和歌词 - 可点击切换显示模式 */}
-      <div 
-        className="flex-1 flex flex-col items-center justify-center px-8 py-6 overflow-hidden cursor-pointer"
-        onClick={() => setShowLyricsOnly(!showLyricsOnly)}
-      >
-        {showLyricsOnly ? (
-          /* 仅显示歌词模式 */
-          lyrics.length > 0 ? (
-            <div 
-              ref={lyricContainerRef}
-              className="flex-1 w-full max-w-2xl overflow-y-auto scrollbar-thin scrollbar-thumb-surface-700 scrollbar-track-transparent"
-              style={{ minHeight: 0 }} // 确保 flex-1 能正确计算高度
-              onClick={(e) => e.stopPropagation()}
-              onScroll={handleLyricScroll}
-            >
-              <div className="space-y-4 px-4 py-8">
-                {lyrics.map((line, index) => {
-                  const isActive = index === currentLyricIndex
-                  return (
-                    <div
-                      key={index}
-                      data-lyric-index={index}
-                      onClick={() => handleLyricClick(line)}
-                      className={`text-center transition-all duration-300 cursor-pointer ${
-                        isActive
-                          ? 'text-primary-400 text-xl font-medium scale-105'
-                          : 'text-surface-400 text-base opacity-60 hover:opacity-80'
-                      }`}
-                    >
-                      {line.text || ' '}
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          ) : (
-            <div className="flex-1 flex items-center justify-center text-surface-500 text-sm">
-              暂无歌词
-            </div>
-          )
-        ) : (
-          /* 封面和歌词同时显示模式 */
-          <>
-            {/* 封面 */}
-            <motion.div
-              animate={{ rotate: isPlaying ? 360 : 0 }}
-              transition={{ duration: 12, repeat: Infinity, ease: 'linear' }}
-              style={{ animationPlayState: isPlaying ? 'running' : 'paused' }}
-              className="relative flex-shrink-0 mb-4"
-            >
-              <div className="w-48 h-48 sm:w-64 sm:h-64 rounded-full overflow-hidden shadow-2xl shadow-black/50 border-8 border-surface-800">
-                {currentTrack?.coverUrl ? (
-                  <img
-                    src={currentTrack.coverUrl}
-                    alt={currentTrack.title}
-                    className="w-full h-full object-cover"
-                  />
-                ) : (
-                  <div className="w-full h-full bg-gradient-to-br from-primary-500/20 to-primary-700/20 flex items-center justify-center">
-                    <div className="w-20 h-20 rounded-full bg-surface-800 border-4 border-surface-700" />
+      {/* 歌词显示区域 */}
+      <div className="flex-1 flex flex-col items-center justify-center px-8 py-6 overflow-hidden">
+        {lyrics.length > 0 ? (
+          <div 
+            ref={lyricContainerRef}
+            className="flex-1 w-full max-w-2xl overflow-y-auto scrollbar-thin scrollbar-thumb-surface-700 scrollbar-track-transparent"
+            style={{ minHeight: 0 }} // 确保 flex-1 能正确计算高度
+            onScroll={handleLyricScroll}
+          >
+            <div className="space-y-4 px-4 py-8">
+              {lyrics.map((line, index) => {
+                const isActive = index === currentLyricIndex
+                return (
+                  <div
+                    key={index}
+                    data-lyric-index={index}
+                    onClick={() => handleLyricClick(line)}
+                    className={`text-center transition-all duration-300 cursor-pointer ${
+                      isActive
+                        ? 'text-primary-400 text-xl font-medium scale-105'
+                        : 'text-surface-400 text-base opacity-60 hover:opacity-80'
+                    }`}
+                  >
+                    {line.text || ' '}
                   </div>
-                )}
-              </div>
-              {/* 唱片中心 */}
-              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="w-20 h-20 rounded-full bg-surface-900 border-4 border-surface-700 shadow-inner flex items-center justify-center">
-                  <div className="w-4 h-4 rounded-full bg-surface-600" />
-                </div>
-              </div>
-            </motion.div>
-
-            {/* 歌词显示区域 */}
-            {lyrics.length > 0 ? (
-              <div 
-                ref={lyricContainerRef}
-                className="flex-1 w-full max-w-lg overflow-y-auto scrollbar-thin scrollbar-thumb-surface-700 scrollbar-track-transparent"
-                style={{ maxHeight: '40vh', minHeight: 0 }}
-                onClick={(e) => e.stopPropagation()}
-                onScroll={handleLyricScroll}
-              >
-                <div className="space-y-3 px-4 py-2">
-                  {lyrics.map((line, index) => {
-                    const isActive = index === currentLyricIndex
-                    return (
-                      <div
-                        key={index}
-                        data-lyric-index={index}
-                        onClick={() => handleLyricClick(line)}
-                        className={`text-center transition-all duration-300 cursor-pointer ${
-                          isActive
-                            ? 'text-primary-400 text-lg font-medium scale-105'
-                            : 'text-surface-400 text-sm hover:opacity-80'
-                        }`}
-                      >
-                        {line.text || ' '}
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            ) : (
-              <div className="flex-1 flex items-center justify-center text-surface-500 text-sm">
-                暂无歌词
-              </div>
-            )}
-          </>
+                )
+              })}
+            </div>
+          </div>
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-surface-500 text-sm">
+            暂无歌词
+          </div>
         )}
       </div>
       
