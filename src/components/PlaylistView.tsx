@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { motion, AnimatePresence, Reorder } from 'framer-motion'
+import { motion, AnimatePresence } from 'framer-motion'
 import { 
   Music, 
   Play, 
@@ -73,10 +73,6 @@ export function PlaylistView() {
         addToPlaylist(track)
       }
     }
-  }
-  
-  const handleReorder = (newOrder: PluginTrack[]) => {
-    setPlaylist(newOrder, playlistName)
   }
   
   // 打开歌手详情
@@ -245,7 +241,6 @@ export function PlaylistView() {
               currentTrack={currentTrack}
               isPlaying={isPlaying}
               onPlay={handlePlay}
-              onReorder={handleReorder}
               onRemove={removeFromPlaylist}
               onClear={clearPlaylist}
             />
@@ -941,7 +936,6 @@ function CurrentPlaylist({
   currentTrack,
   isPlaying,
   onPlay,
-  onReorder,
   onRemove,
   onClear,
 }: {
@@ -950,7 +944,6 @@ function CurrentPlaylist({
   currentTrack: PluginTrack | null
   isPlaying: boolean
   onPlay: (track: PluginTrack) => void
-  onReorder: (tracks: PluginTrack[]) => void
   onRemove: (trackId: string) => void
   onClear: () => void
 }) {
@@ -990,36 +983,29 @@ function CurrentPlaylist({
               description="选择歌单、专辑或歌手后，歌曲会添加到这里"
             />
           ) : (
-            <Reorder.Group 
-              axis="y" 
-              values={playlist} 
-              onReorder={onReorder}
-              className="space-y-2"
-            >
+            <div className="space-y-2">
               <AnimatePresence mode="popLayout">
                 {playlist.map((track, index) => (
-                  <Reorder.Item
+                  <motion.div
                     key={track.id}
-                    value={track}
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, x: -100 }}
                     transition={{ delay: Math.min(index * 0.02, 0.2) }}
-                    className="touch-none"
                   >
                     <TrackItem
                       track={track}
                       index={index}
                       currentTrack={currentTrack}
                       isPlaying={isPlaying}
-                      showDragHandle
+                      showDragHandle={false}
                       onPlay={onPlay}
                       onRemove={onRemove}
                     />
-                  </Reorder.Item>
+                  </motion.div>
                 ))}
               </AnimatePresence>
-            </Reorder.Group>
+            </div>
           )}
         </div>
       </div>
