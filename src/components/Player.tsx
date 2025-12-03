@@ -179,6 +179,7 @@ export function Player({ onClose, onSeek }: PlayerProps) {
 
   // 自动滚动到当前歌词行（仅在用户未主动滚动时）
   // 这是主要的自动滚动逻辑，响应 currentTime 的变化
+  // 使用和进入播放页面时相同的定位方法（延迟 150ms）
   useEffect(() => {
     // 只有在有歌词且索引有效时才滚动
     if (lyrics.length === 0 || currentLyricIndex < 0) {
@@ -190,61 +191,21 @@ export function Player({ onClose, onSeek }: PlayerProps) {
       return
     }
     
-    // 确保容器存在
-    if (!lyricContainerRef.current) {
-      // 延迟一下，等待DOM渲染
-      const timer = setTimeout(() => {
-        if (lyricContainerRef.current && !userScrollingRef.current) {
-          scrollToLyric(currentLyricIndex, 'smooth')
-          lastAutoScrollIndexRef.current = currentLyricIndex
-        }
-      }, 100)
-      return () => clearTimeout(timer)
+    // 如果索引没有变化，不重复滚动
+    if (currentLyricIndex === lastAutoScrollIndexRef.current) {
+      return
     }
     
-    // 如果索引变化了，立即滚动到新位置
-    if (currentLyricIndex !== lastAutoScrollIndexRef.current) {
-      // 使用 requestAnimationFrame 确保在下一帧执行，DOM 已更新
-      const rafId = requestAnimationFrame(() => {
-        if (!lyricContainerRef.current || userScrollingRef.current) {
-          return
-        }
-        
-        // 执行滚动，确保歌词在中间
+    // 使用和进入播放页面时相同的延迟方法（150ms），确保DOM已渲染
+    const timer = setTimeout(() => {
+      if (lyricContainerRef.current && !userScrollingRef.current) {
         scrollToLyric(currentLyricIndex, 'smooth')
         lastAutoScrollIndexRef.current = currentLyricIndex
-      })
-      
-      return () => cancelAnimationFrame(rafId)
-    }
-    
-    // 即使索引没变化，也定期检查并确保歌词在中间位置（防止滚动偏移）
-    // 使用较长的间隔，避免过于频繁的滚动
-    const checkInterval = setInterval(() => {
-      if (!lyricContainerRef.current || userScrollingRef.current) {
-        return
       }
-      
-      // 检查当前歌词是否在可视区域中间
-      const container = lyricContainerRef.current
-      const lyricElement = container.querySelector(`[data-lyric-index="${currentLyricIndex}"]`) as HTMLElement
-      
-      if (lyricElement) {
-        const containerRect = container.getBoundingClientRect()
-        const elementRect = lyricElement.getBoundingClientRect()
-        const elementCenter = elementRect.top + elementRect.height / 2
-        const containerCenter = containerRect.top + containerRect.height / 2
-        const offset = Math.abs(elementCenter - containerCenter)
-        
-        // 如果偏移超过容器高度的 10%，重新居中
-        if (offset > containerRect.height * 0.1) {
-          scrollToLyric(currentLyricIndex, 'smooth')
-        }
-      }
-    }, 500) // 每 500ms 检查一次
+    }, 150)
     
-    return () => clearInterval(checkInterval)
-  }, [currentLyricIndex, currentTime, scrollToLyric, lyrics.length])
+    return () => clearTimeout(timer)
+  }, [currentLyricIndex, scrollToLyric])
 
   // 清理定时器
   useEffect(() => {
