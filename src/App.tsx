@@ -369,9 +369,20 @@ function App() {
 
   // 当 currentTrack 改变时解析流和获取歌词
   useEffect(() => {
-    if (!currentTrack) return
+    if (!currentTrack) {
+      // 如果没有当前歌曲，清空歌词
+      setLyrics([])
+      return
+    }
     
     const trackId = currentTrack.id
+    console.log('[歌词调试] useEffect: currentTrack 改变，trackId:', trackId, 'currentStream:', !!currentStream)
+    
+    // 重置解析标记（如果 track 改变了）
+    if (resolvingStreamRef.current && resolvingStreamRef.current !== trackId) {
+      console.log('[歌词调试] useEffect: 切换歌曲，重置解析标记')
+      resolvingStreamRef.current = null
+    }
     
     // 如果正在解析同一个 track，跳过
     if (resolvingStreamRef.current === trackId) {
@@ -379,21 +390,24 @@ function App() {
       return
     }
     
-    // 重置解析标记（如果 track 改变了）
-    if (resolvingStreamRef.current && resolvingStreamRef.current !== trackId) {
-      resolvingStreamRef.current = null
-    }
-    
     // 先尝试从现有数据中获取歌词
+    console.log('[歌词调试] useEffect: 调用 fetchLyrics')
     fetchLyrics()
     
-    // 只有在没有 currentStream 时才解析流
+    // 只有在没有 currentStream 时才解析流（setCurrentTrack 已经将 currentStream 设为 null）
     if (!currentStream) {
+      console.log('[歌词调试] useEffect: 没有 currentStream，调用 resolveStream')
       // 解析流时会自动提取并保存歌词
       resolveStream()
+    } else {
+      console.log('[歌词调试] useEffect: 已有 currentStream，跳过解析，但会再次尝试获取歌词')
+      // 即使有 currentStream，也再次尝试获取歌词（可能歌词在解析流后才到达）
+      setTimeout(() => {
+        fetchLyrics()
+      }, 100)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTrack?.id, currentStream]) // 依赖 track id 和 currentStream
+  }, [currentTrack?.id]) // 只依赖 track id，确保切换歌曲时一定会触发
   
   // 当 currentStream 改变时加载音频
   useEffect(() => {
