@@ -74,9 +74,6 @@ export function Player({ onClose, onSeek }: PlayerProps) {
       const lyricElement = container.children[currentLyricIndex] as HTMLElement
       if (lyricElement) {
         // 计算需要滚动的距离
-        const containerRect = container.getBoundingClientRect()
-        const elementRect = lyricElement.getBoundingClientRect()
-        const scrollTop = container.scrollTop
         const elementTop = lyricElement.offsetTop
         const elementHeight = lyricElement.offsetHeight
         const containerHeight = container.clientHeight
