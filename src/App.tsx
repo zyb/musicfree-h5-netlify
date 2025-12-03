@@ -24,6 +24,7 @@ function App() {
   const [activeTab, setActiveTab] = useState<TabId>('search')
   const [showPlayer, setShowPlayer] = useState(false)
   const audioRef = useRef<HTMLAudioElement>(null)
+  const resolvingStreamRef = useRef<string | null>(null) // 跟踪正在解析的 track id
   
   const init = usePluginStore((s) => s.init)
   const getActivePluginInstance = usePluginStore((s) => s.getActivePluginInstance)
@@ -56,17 +57,28 @@ function App() {
       return
     }
     
+    // 防止重复调用：如果正在解析同一个 track，直接返回
+    if (resolvingStreamRef.current === currentTrack.id) {
+      console.log('[歌词调试] resolveStream: 正在解析中，跳过重复调用')
+      return
+    }
+    
+    // 标记开始解析
+    resolvingStreamRef.current = currentTrack.id
+    
     console.log('[歌词调试] resolveStream 开始，currentTrack:', {
       id: currentTrack.id,
       title: currentTrack.title,
       extra: currentTrack.extra,
     })
     
-    if (currentTrack.streamUrl) {
-      console.log('[歌词调试] 使用 streamUrl:', currentTrack.streamUrl)
-      setCurrentStream({ url: currentTrack.streamUrl })
-      return
-    }
+    try {
+      if (currentTrack.streamUrl) {
+        console.log('[歌词调试] 使用 streamUrl:', currentTrack.streamUrl)
+        setCurrentStream({ url: currentTrack.streamUrl })
+        resolvingStreamRef.current = null
+        return
+      }
     
     // 尝试直接调用原生插件的 getMediaSource，以获取完整数据（包括歌词）
     const host = (globalThis as any).MusicFreeH5
@@ -117,6 +129,7 @@ function App() {
                 }
                 setCurrentStream({ url: result.url })
                 setIsLoading(false)
+                resolvingStreamRef.current = null
                 return
               }
             } catch (error) {
@@ -129,49 +142,57 @@ function App() {
           setError(error instanceof Error ? error.message : '解析失败')
         } finally {
           setIsLoading(false)
-        }
-      }
-    }
-    
-    // 回退到使用插件的 resolveStream 方法
-    console.log('[歌词调试] 回退到使用插件的 resolveStream 方法')
-    const plugin = getActivePluginInstance()
-    if (!plugin?.resolveStream) {
-      console.error('[歌词调试] 插件没有 resolveStream 方法')
-      setError('无法解析音频地址')
-      return
-    }
-    
-    setIsLoading(true)
-    try {
-      const stream = await plugin.resolveStream(currentTrack) as { url: string; _lrc?: string }
-      console.log('[歌词调试] 插件 resolveStream 返回:', {
-        url: stream?.url,
-        hasLrc: !!stream?._lrc,
-        lrcLength: stream?._lrc?.length,
-        lrcPreview: stream?._lrc?.substring(0, 100),
-      })
-      
-      // 如果返回的数据中包含 _lrc（临时字段），提取并保存
-      if (stream?._lrc) {
-        console.log('[歌词调试] 从 resolveStream 返回中提取到歌词，长度:', stream._lrc.length)
-        updateCurrentTrackExtra({ lrc: stream._lrc })
-        // 立即解析歌词
-        const lyrics = parseLRC(stream._lrc)
-        console.log('[歌词调试] 解析歌词结果，行数:', lyrics.length)
-        if (lyrics.length > 0) {
-          setLyrics(lyrics)
-          console.log('[歌词调试] 歌词已设置到 store')
+          resolvingStreamRef.current = null
         }
       }
       
-      // 只传递 url 给 setCurrentStream
-      setCurrentStream({ url: stream.url })
-    } catch (error) {
-      console.error('[歌词调试] 插件 resolveStream 错误:', error)
-      setError(error instanceof Error ? error.message : '解析失败')
+      // 回退到使用插件的 resolveStream 方法
+      console.log('[歌词调试] 回退到使用插件的 resolveStream 方法')
+      const plugin = getActivePluginInstance()
+      if (!plugin?.resolveStream) {
+        console.error('[歌词调试] 插件没有 resolveStream 方法')
+        setError('无法解析音频地址')
+        resolvingStreamRef.current = null
+        return
+      }
+      
+      setIsLoading(true)
+      try {
+        const stream = await plugin.resolveStream(currentTrack) as { url: string; _lrc?: string }
+        console.log('[歌词调试] 插件 resolveStream 返回:', {
+          url: stream?.url,
+          hasLrc: !!stream?._lrc,
+          lrcLength: stream?._lrc?.length,
+          lrcPreview: stream?._lrc?.substring(0, 100),
+        })
+        
+        // 如果返回的数据中包含 _lrc（临时字段），提取并保存
+        if (stream?._lrc) {
+          console.log('[歌词调试] 从 resolveStream 返回中提取到歌词，长度:', stream._lrc.length)
+          updateCurrentTrackExtra({ lrc: stream._lrc })
+          // 立即解析歌词
+          const lyrics = parseLRC(stream._lrc)
+          console.log('[歌词调试] 解析歌词结果，行数:', lyrics.length)
+          if (lyrics.length > 0) {
+            setLyrics(lyrics)
+            console.log('[歌词调试] 歌词已设置到 store')
+          }
+        }
+        
+        // 只传递 url 给 setCurrentStream
+        setCurrentStream({ url: stream.url })
+      } catch (error) {
+        console.error('[歌词调试] 插件 resolveStream 错误:', error)
+        setError(error instanceof Error ? error.message : '解析失败')
+      } finally {
+        setIsLoading(false)
+        resolvingStreamRef.current = null
+      }
     } finally {
-      setIsLoading(false)
+      // 确保在函数结束时清除标记（如果还没有清除）
+      if (resolvingStreamRef.current === currentTrack.id) {
+        resolvingStreamRef.current = null
+      }
     }
   }, [currentTrack, getActivePluginInstance, setCurrentStream, setError, setIsLoading, updateCurrentTrackExtra, setLyrics])
   
@@ -347,16 +368,31 @@ function App() {
 
   // 当 currentTrack 改变时解析流和获取歌词
   useEffect(() => {
-    if (currentTrack) {
-      // 先尝试从现有数据中获取歌词
-      fetchLyrics()
-      
-      if (!currentStream) {
-        // 解析流时会自动提取并保存歌词
-        resolveStream()
-      }
+    if (!currentTrack) return
+    
+    const trackId = currentTrack.id
+    
+    // 如果正在解析同一个 track，跳过
+    if (resolvingStreamRef.current === trackId) {
+      console.log('[歌词调试] useEffect: 正在解析中，跳过')
+      return
     }
-  }, [currentTrack, currentStream, resolveStream, fetchLyrics])
+    
+    // 重置解析标记（如果 track 改变了）
+    if (resolvingStreamRef.current && resolvingStreamRef.current !== trackId) {
+      resolvingStreamRef.current = null
+    }
+    
+    // 先尝试从现有数据中获取歌词
+    fetchLyrics()
+    
+    // 只有在没有 currentStream 时才解析流
+    if (!currentStream) {
+      // 解析流时会自动提取并保存歌词
+      resolveStream()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTrack?.id, currentStream]) // 依赖 track id 和 currentStream
   
   // 当 currentStream 改变时加载音频
   useEffect(() => {

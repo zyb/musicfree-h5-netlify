@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { motion } from 'framer-motion'
 import { 
   ChevronDown, 
@@ -65,30 +65,118 @@ export function Player({ onClose, onSeek }: PlayerProps) {
 
   const [showLyricsOnly, setShowLyricsOnly] = useState(false)
   const lyricContainerRef = useRef<HTMLDivElement>(null)
+  const userScrollingRef = useRef(false) // 用户是否正在滚动
+  const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null) // 滚动超时定时器
+  const lastAutoScrollIndexRef = useRef(-1) // 上次自动滚动的歌词索引
   const currentLyricIndex = getCurrentLyricIndex(lyrics, currentTime)
 
-  // 自动滚动到当前歌词行
-  useEffect(() => {
-    if (lyricContainerRef.current && currentLyricIndex >= 0 && showLyricsOnly) {
-      const container = lyricContainerRef.current
-      const lyricElement = container.children[currentLyricIndex] as HTMLElement
-      if (lyricElement) {
-        // 计算需要滚动的距离
-        const elementTop = lyricElement.offsetTop
-        const elementHeight = lyricElement.offsetHeight
-        const containerHeight = container.clientHeight
-        
-        // 计算目标位置（居中显示）
-        const targetScrollTop = elementTop - (containerHeight / 2) + (elementHeight / 2)
-        
-        // 平滑滚动
-        container.scrollTo({
-          top: targetScrollTop,
-          behavior: 'smooth',
-        })
+  // 滚动到指定歌词行
+  const scrollToLyric = useCallback((index: number, behavior: ScrollBehavior = 'smooth') => {
+    if (!lyricContainerRef.current || index < 0) return
+    
+    const container = lyricContainerRef.current
+    const lyricElement = container.children[index] as HTMLElement
+    if (lyricElement) {
+      const elementTop = lyricElement.offsetTop
+      const elementHeight = lyricElement.offsetHeight
+      const containerHeight = container.clientHeight
+      
+      // 计算目标位置（居中显示）
+      const targetScrollTop = elementTop - (containerHeight / 2) + (elementHeight / 2)
+      
+      container.scrollTo({
+        top: targetScrollTop,
+        behavior,
+      })
+    }
+  }, [])
+
+  // 处理用户滚动
+  const handleLyricScroll = useCallback(() => {
+    if (!lyricContainerRef.current) return
+    
+    // 标记用户正在滚动
+    userScrollingRef.current = true
+    
+    // 清除之前的定时器
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current)
+    }
+    
+    // 5秒后恢复自动滚动
+    scrollTimeoutRef.current = setTimeout(() => {
+      userScrollingRef.current = false
+      // 恢复后立即滚动到当前歌词行
+      const currentIndex = getCurrentLyricIndex(lyrics, currentTime)
+      if (currentIndex >= 0) {
+        scrollToLyric(currentIndex)
+        lastAutoScrollIndexRef.current = currentIndex
+      }
+    }, 5000)
+  }, [lyrics, currentTime, scrollToLyric])
+
+  // 处理歌词行点击
+  const handleLyricClick = useCallback((line: { time: number; text: string }) => {
+    onSeek(line.time)
+    // 立即滚动到这一行
+    const index = lyrics.findIndex(l => l.time === line.time)
+    if (index >= 0) {
+      scrollToLyric(index, 'smooth')
+      lastAutoScrollIndexRef.current = index
+      // 重置用户滚动标志，允许自动滚动
+      userScrollingRef.current = false
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current)
       }
     }
-  }, [currentLyricIndex, showLyricsOnly, currentTime])
+  }, [lyrics, onSeek, scrollToLyric])
+
+  // 当切换到仅歌词模式时，自动定位到当前歌词
+  useEffect(() => {
+    if (showLyricsOnly && lyrics.length > 0 && currentLyricIndex >= 0) {
+      // 延迟一下确保DOM已渲染
+      const timer = setTimeout(() => {
+        scrollToLyric(currentLyricIndex, 'smooth')
+        lastAutoScrollIndexRef.current = currentLyricIndex
+        userScrollingRef.current = false // 重置滚动标志
+      }, 100)
+      return () => clearTimeout(timer)
+    }
+  }, [showLyricsOnly, lyrics.length, currentLyricIndex, scrollToLyric])
+
+  // 当歌词加载完成时，自动定位到当前歌词
+  useEffect(() => {
+    if (lyrics.length > 0 && currentLyricIndex >= 0 && !userScrollingRef.current) {
+      // 延迟一下确保DOM已渲染
+      const timer = setTimeout(() => {
+        scrollToLyric(currentLyricIndex, 'smooth')
+        lastAutoScrollIndexRef.current = currentLyricIndex
+      }, 100)
+      return () => clearTimeout(timer)
+    }
+  }, [lyrics.length, currentLyricIndex, scrollToLyric])
+
+  // 自动滚动到当前歌词行（仅在用户未主动滚动时）
+  useEffect(() => {
+    if (
+      lyricContainerRef.current && 
+      currentLyricIndex >= 0 && 
+      !userScrollingRef.current &&
+      currentLyricIndex !== lastAutoScrollIndexRef.current
+    ) {
+      scrollToLyric(currentLyricIndex, 'smooth')
+      lastAutoScrollIndexRef.current = currentLyricIndex
+    }
+  }, [currentLyricIndex, currentTime, scrollToLyric])
+
+  // 清理定时器
+  useEffect(() => {
+    return () => {
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current)
+      }
+    }
+  }, [])
   
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const time = parseFloat(e.target.value)
@@ -143,6 +231,7 @@ export function Player({ onClose, onSeek }: PlayerProps) {
               ref={lyricContainerRef}
               className="flex-1 w-full max-w-2xl overflow-y-auto scrollbar-thin scrollbar-thumb-surface-700 scrollbar-track-transparent"
               onClick={(e) => e.stopPropagation()}
+              onScroll={handleLyricScroll}
             >
               <div className="space-y-4 px-4 py-8">
                 {lyrics.map((line, index) => {
@@ -150,10 +239,11 @@ export function Player({ onClose, onSeek }: PlayerProps) {
                   return (
                     <div
                       key={index}
-                      className={`text-center transition-all duration-300 ${
+                      onClick={() => handleLyricClick(line)}
+                      className={`text-center transition-all duration-300 cursor-pointer ${
                         isActive
                           ? 'text-primary-400 text-xl font-medium scale-105'
-                          : 'text-surface-400 text-base opacity-60'
+                          : 'text-surface-400 text-base opacity-60 hover:opacity-80'
                       }`}
                     >
                       {line.text || ' '}
@@ -205,6 +295,7 @@ export function Player({ onClose, onSeek }: PlayerProps) {
                 className="flex-1 w-full max-w-lg overflow-y-auto scrollbar-thin scrollbar-thumb-surface-700 scrollbar-track-transparent"
                 style={{ maxHeight: '40vh' }}
                 onClick={(e) => e.stopPropagation()}
+                onScroll={handleLyricScroll}
               >
                 <div className="space-y-3 px-4 py-2">
                   {lyrics.map((line, index) => {
@@ -212,10 +303,11 @@ export function Player({ onClose, onSeek }: PlayerProps) {
                     return (
                       <div
                         key={index}
-                        className={`text-center transition-all duration-300 ${
+                        onClick={() => handleLyricClick(line)}
+                        className={`text-center transition-all duration-300 cursor-pointer ${
                           isActive
                             ? 'text-primary-400 text-lg font-medium scale-105'
-                            : 'text-surface-400 text-sm'
+                            : 'text-surface-400 text-sm hover:opacity-80'
                         }`}
                       >
                         {line.text || ' '}
