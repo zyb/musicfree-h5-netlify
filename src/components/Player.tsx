@@ -78,17 +78,43 @@ export function Player({ onClose, onSeek }: PlayerProps) {
 
   // 滚动到指定歌词行
   const scrollToLyric = useCallback((index: number, behavior: ScrollBehavior = 'smooth') => {
-    if (!lyricContainerRef.current || index < 0) return
+    if (!lyricContainerRef.current || index < 0) {
+      return
+    }
     
     const container = lyricContainerRef.current
-    const lyricElement = container.children[index] as HTMLElement
-    if (lyricElement) {
-      const elementTop = lyricElement.offsetTop
-      const elementHeight = lyricElement.offsetHeight
-      const containerHeight = container.clientHeight
-      
-      // 计算目标位置（居中显示）
-      const targetScrollTop = elementTop - (containerHeight / 2) + (elementHeight / 2)
+    
+    // 方法1: 尝试通过 data-lyric-index 属性查找
+    const lyricElementByAttr = container.querySelector(`[data-lyric-index="${index}"]`) as HTMLElement
+    
+    // 方法2: 如果方法1失败，尝试通过 children 查找
+    let lyricElement = lyricElementByAttr
+    if (!lyricElement) {
+      const innerContainer = container.firstElementChild as HTMLElement
+      if (innerContainer && innerContainer.children[index]) {
+        lyricElement = innerContainer.children[index] as HTMLElement
+      }
+    }
+    
+    if (!lyricElement) {
+      console.warn('[歌词滚动] 找不到歌词元素，索引:', index)
+      return
+    }
+    
+    // 使用 scrollIntoView 方法，更可靠
+    try {
+      lyricElement.scrollIntoView({
+        behavior,
+        block: 'center',
+        inline: 'nearest',
+      })
+    } catch (error) {
+      console.error('[歌词滚动] scrollIntoView 失败:', error)
+      // 回退到手动计算
+      const containerRect = container.getBoundingClientRect()
+      const elementRect = lyricElement.getBoundingClientRect()
+      const scrollTop = container.scrollTop
+      const targetScrollTop = scrollTop + (elementRect.top - containerRect.top) - (containerRect.height / 2) + (elementRect.height / 2)
       
       container.scrollTo({
         top: targetScrollTop,
@@ -186,12 +212,28 @@ export function Player({ onClose, onSeek }: PlayerProps) {
     
     // 确保容器存在
     if (!lyricContainerRef.current) {
-      return
+      // 延迟一下，等待DOM渲染
+      const timer = setTimeout(() => {
+        if (lyricContainerRef.current && !userScrollingRef.current) {
+          scrollToLyric(currentLyricIndex, 'smooth')
+          lastAutoScrollIndexRef.current = currentLyricIndex
+        }
+      }, 100)
+      return () => clearTimeout(timer)
     }
     
-    // 执行滚动（不延迟，确保及时响应）
-    scrollToLyric(currentLyricIndex, 'smooth')
-    lastAutoScrollIndexRef.current = currentLyricIndex
+    // 延迟一下确保DOM已完全渲染（特别是在切换显示模式时）
+    const timer = setTimeout(() => {
+      if (!lyricContainerRef.current || userScrollingRef.current) {
+        return
+      }
+      
+      // 执行滚动
+      scrollToLyric(currentLyricIndex, 'smooth')
+      lastAutoScrollIndexRef.current = currentLyricIndex
+    }, 50)
+    
+    return () => clearTimeout(timer)
   }, [currentLyricIndex, scrollToLyric])
 
   // 清理定时器
@@ -255,6 +297,7 @@ export function Player({ onClose, onSeek }: PlayerProps) {
             <div 
               ref={lyricContainerRef}
               className="flex-1 w-full max-w-2xl overflow-y-auto scrollbar-thin scrollbar-thumb-surface-700 scrollbar-track-transparent"
+              style={{ minHeight: 0 }} // 确保 flex-1 能正确计算高度
               onClick={(e) => e.stopPropagation()}
               onScroll={handleLyricScroll}
             >
@@ -264,6 +307,7 @@ export function Player({ onClose, onSeek }: PlayerProps) {
                   return (
                     <div
                       key={index}
+                      data-lyric-index={index}
                       onClick={() => handleLyricClick(line)}
                       className={`text-center transition-all duration-300 cursor-pointer ${
                         isActive
@@ -318,7 +362,7 @@ export function Player({ onClose, onSeek }: PlayerProps) {
               <div 
                 ref={lyricContainerRef}
                 className="flex-1 w-full max-w-lg overflow-y-auto scrollbar-thin scrollbar-thumb-surface-700 scrollbar-track-transparent"
-                style={{ maxHeight: '40vh' }}
+                style={{ maxHeight: '40vh', minHeight: 0 }}
                 onClick={(e) => e.stopPropagation()}
                 onScroll={handleLyricScroll}
               >
@@ -328,6 +372,7 @@ export function Player({ onClose, onSeek }: PlayerProps) {
                     return (
                       <div
                         key={index}
+                        data-lyric-index={index}
                         onClick={() => handleLyricClick(line)}
                         className={`text-center transition-all duration-300 cursor-pointer ${
                           isActive
