@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { 
   ChevronDown, 
@@ -63,21 +63,35 @@ export function Player({ onClose, onSeek }: PlayerProps) {
     playPrevious,
   } = usePlayerStore()
 
+  const [showLyricsOnly, setShowLyricsOnly] = useState(false)
   const lyricContainerRef = useRef<HTMLDivElement>(null)
   const currentLyricIndex = getCurrentLyricIndex(lyrics, currentTime)
 
   // 自动滚动到当前歌词行
   useEffect(() => {
-    if (lyricContainerRef.current && currentLyricIndex >= 0) {
-      const lyricElement = lyricContainerRef.current.children[currentLyricIndex] as HTMLElement
+    if (lyricContainerRef.current && currentLyricIndex >= 0 && showLyricsOnly) {
+      const container = lyricContainerRef.current
+      const lyricElement = container.children[currentLyricIndex] as HTMLElement
       if (lyricElement) {
-        lyricElement.scrollIntoView({
+        // 计算需要滚动的距离
+        const containerRect = container.getBoundingClientRect()
+        const elementRect = lyricElement.getBoundingClientRect()
+        const scrollTop = container.scrollTop
+        const elementTop = lyricElement.offsetTop
+        const elementHeight = lyricElement.offsetHeight
+        const containerHeight = container.clientHeight
+        
+        // 计算目标位置（居中显示）
+        const targetScrollTop = elementTop - (containerHeight / 2) + (elementHeight / 2)
+        
+        // 平滑滚动
+        container.scrollTo({
+          top: targetScrollTop,
           behavior: 'smooth',
-          block: 'center',
         })
       }
     }
-  }, [currentLyricIndex])
+  }, [currentLyricIndex, showLyricsOnly, currentTime])
   
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const time = parseFloat(e.target.value)
@@ -120,65 +134,105 @@ export function Player({ onClose, onSeek }: PlayerProps) {
         <div className="w-10" />
       </header>
       
-      {/* 封面和歌词 */}
-      <div className="flex-1 flex flex-col items-center justify-center px-8 py-6 overflow-hidden">
-        {/* 封面 */}
-        <motion.div
-          animate={{ rotate: isPlaying ? 360 : 0 }}
-          transition={{ duration: 12, repeat: Infinity, ease: 'linear' }}
-          style={{ animationPlayState: isPlaying ? 'running' : 'paused' }}
-          className="relative flex-shrink-0 mb-4"
-        >
-          <div className="w-48 h-48 sm:w-64 sm:h-64 rounded-full overflow-hidden shadow-2xl shadow-black/50 border-8 border-surface-800">
-            {currentTrack?.coverUrl ? (
-              <img
-                src={currentTrack.coverUrl}
-                alt={currentTrack.title}
-                className="w-full h-full object-cover"
-              />
+      {/* 封面和歌词 - 可点击切换显示模式 */}
+      <div 
+        className="flex-1 flex flex-col items-center justify-center px-8 py-6 overflow-hidden cursor-pointer"
+        onClick={() => setShowLyricsOnly(!showLyricsOnly)}
+      >
+        {showLyricsOnly ? (
+          /* 仅显示歌词模式 */
+          lyrics.length > 0 ? (
+            <div 
+              ref={lyricContainerRef}
+              className="flex-1 w-full max-w-2xl overflow-y-auto scrollbar-thin scrollbar-thumb-surface-700 scrollbar-track-transparent"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="space-y-4 px-4 py-8">
+                {lyrics.map((line, index) => {
+                  const isActive = index === currentLyricIndex
+                  return (
+                    <div
+                      key={index}
+                      className={`text-center transition-all duration-300 ${
+                        isActive
+                          ? 'text-primary-400 text-xl font-medium scale-105'
+                          : 'text-surface-400 text-base opacity-60'
+                      }`}
+                    >
+                      {line.text || ' '}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-surface-500 text-sm">
+              暂无歌词
+            </div>
+          )
+        ) : (
+          /* 封面和歌词同时显示模式 */
+          <>
+            {/* 封面 */}
+            <motion.div
+              animate={{ rotate: isPlaying ? 360 : 0 }}
+              transition={{ duration: 12, repeat: Infinity, ease: 'linear' }}
+              style={{ animationPlayState: isPlaying ? 'running' : 'paused' }}
+              className="relative flex-shrink-0 mb-4"
+            >
+              <div className="w-48 h-48 sm:w-64 sm:h-64 rounded-full overflow-hidden shadow-2xl shadow-black/50 border-8 border-surface-800">
+                {currentTrack?.coverUrl ? (
+                  <img
+                    src={currentTrack.coverUrl}
+                    alt={currentTrack.title}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="w-full h-full bg-gradient-to-br from-primary-500/20 to-primary-700/20 flex items-center justify-center">
+                    <div className="w-20 h-20 rounded-full bg-surface-800 border-4 border-surface-700" />
+                  </div>
+                )}
+              </div>
+              {/* 唱片中心 */}
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <div className="w-20 h-20 rounded-full bg-surface-900 border-4 border-surface-700 shadow-inner flex items-center justify-center">
+                  <div className="w-4 h-4 rounded-full bg-surface-600" />
+                </div>
+              </div>
+            </motion.div>
+
+            {/* 歌词显示区域 */}
+            {lyrics.length > 0 ? (
+              <div 
+                ref={lyricContainerRef}
+                className="flex-1 w-full max-w-lg overflow-y-auto scrollbar-thin scrollbar-thumb-surface-700 scrollbar-track-transparent"
+                style={{ maxHeight: '40vh' }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="space-y-3 px-4 py-2">
+                  {lyrics.map((line, index) => {
+                    const isActive = index === currentLyricIndex
+                    return (
+                      <div
+                        key={index}
+                        className={`text-center transition-all duration-300 ${
+                          isActive
+                            ? 'text-primary-400 text-lg font-medium scale-105'
+                            : 'text-surface-400 text-sm'
+                        }`}
+                      >
+                        {line.text || ' '}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
             ) : (
-              <div className="w-full h-full bg-gradient-to-br from-primary-500/20 to-primary-700/20 flex items-center justify-center">
-                <div className="w-20 h-20 rounded-full bg-surface-800 border-4 border-surface-700" />
+              <div className="flex-1 flex items-center justify-center text-surface-500 text-sm">
+                暂无歌词
               </div>
             )}
-          </div>
-          {/* 唱片中心 */}
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <div className="w-20 h-20 rounded-full bg-surface-900 border-4 border-surface-700 shadow-inner flex items-center justify-center">
-              <div className="w-4 h-4 rounded-full bg-surface-600" />
-            </div>
-          </div>
-        </motion.div>
-
-        {/* 歌词显示区域 */}
-        {lyrics.length > 0 ? (
-          <div 
-            ref={lyricContainerRef}
-            className="flex-1 w-full max-w-lg overflow-y-auto scrollbar-thin scrollbar-thumb-surface-700 scrollbar-track-transparent"
-            style={{ maxHeight: '40vh' }}
-          >
-            <div className="space-y-3 px-4 py-2">
-              {lyrics.map((line, index) => {
-                const isActive = index === currentLyricIndex
-                return (
-                  <div
-                    key={index}
-                    className={`text-center transition-all duration-300 ${
-                      isActive
-                        ? 'text-primary-400 text-lg font-medium scale-105'
-                        : 'text-surface-400 text-sm'
-                    }`}
-                  >
-                    {line.text || ' '}
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        ) : (
-          <div className="flex-1 flex items-center justify-center text-surface-500 text-sm">
-            暂无歌词
-          </div>
+          </>
         )}
       </div>
       

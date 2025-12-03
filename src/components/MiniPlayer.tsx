@@ -161,88 +161,78 @@ export function MiniPlayer({ onExpand }: MiniPlayerProps) {
                 />
               </div>
               
-              <div className="flex items-center gap-3 p-3">
-                {/* 封面 - 点击展开全屏播放器 */}
-                <div 
-                  onClick={onExpand}
-                  className={`w-12 h-12 rounded-xl overflow-hidden flex-shrink-0 cursor-pointer ${isPlaying ? 'vinyl-spin playing' : ''}`}
-                >
-                  {currentTrack?.coverUrl ? (
-                    <img
-                      src={currentTrack.coverUrl}
-                      alt={currentTrack.title}
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <div className="w-full h-full bg-gradient-to-br from-primary-500/30 to-primary-700/30 flex items-center justify-center">
-                      <Music className="w-5 h-5 text-primary-400" />
-                    </div>
-                  )}
-                </div>
-                
-                {/* 歌曲信息 - 点击展开全屏播放器 */}
-                <div className="flex-1 min-w-0 cursor-pointer" onClick={onExpand}>
-                  <h3 className="font-medium text-sm text-surface-100 truncate">
-                    {currentTrack?.title || '未选择歌曲'}
-                  </h3>
-                  {currentLyric ? (
-                    <p className="text-xs text-primary-400 truncate mt-0.5">
-                      {currentLyric.text}
-                    </p>
-                  ) : (
+              {/* 主要内容区域 */}
+              <div className="flex flex-col">
+                <div className="flex items-center gap-3 p-3">
+                  {/* 封面 - 点击展开全屏播放器 */}
+                  <div 
+                    onClick={onExpand}
+                    className={`w-12 h-12 rounded-xl overflow-hidden flex-shrink-0 cursor-pointer ${isPlaying ? 'vinyl-spin playing' : ''}`}
+                  >
+                    {currentTrack?.coverUrl ? (
+                      <img
+                        src={currentTrack.coverUrl}
+                        alt={currentTrack.title}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-full bg-gradient-to-br from-primary-500/30 to-primary-700/30 flex items-center justify-center">
+                        <Music className="w-5 h-5 text-primary-400" />
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* 歌曲信息 - 点击展开全屏播放器 */}
+                  <div className="flex-1 min-w-0 cursor-pointer" onClick={onExpand}>
+                    <h3 className="font-medium text-sm text-surface-100 truncate">
+                      {currentTrack?.title || '未选择歌曲'}
+                    </h3>
                     <p className="text-xs text-surface-400 truncate">
                       {currentTrack?.artists?.join(' / ') || '未知艺术家'}
                     </p>
-                  )}
+                  </div>
+                  
+                  {/* 控制按钮 */}
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={togglePlay}
+                      disabled={isLoading || !currentStream}
+                      className="w-10 h-10 rounded-full bg-primary-500 text-surface-950 flex items-center justify-center hover:bg-primary-400 transition-colors disabled:opacity-50"
+                    >
+                      {isLoading ? (
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                      ) : isPlaying ? (
+                        <Pause className="w-5 h-5" fill="currentColor" />
+                      ) : (
+                        <Play className="w-5 h-5 ml-0.5" fill="currentColor" />
+                      )}
+                    </button>
+                    
+                    <button
+                      onClick={handleNext}
+                      className="w-10 h-10 flex items-center justify-center text-surface-300 hover:text-surface-100 transition-colors"
+                    >
+                      <SkipForward className="w-5 h-5" fill="currentColor" />
+                    </button>
+                  </div>
+                  
+                  {/* 收缩按钮 */}
+                  <button
+                    onClick={() => setCollapsed(true)}
+                    className="w-8 h-8 flex items-center justify-center text-surface-500 hover:text-surface-300 transition-colors"
+                  >
+                    <ChevronRight className="w-5 h-5" />
+                  </button>
                 </div>
                 
-                {/* 音波动画 */}
-                {isPlaying && (
-                  <div className="flex items-end gap-0.5 h-4 mr-1">
-                    {[1, 2, 3, 4].map((i) => (
-                      <div
-                        key={i}
-                        className="w-0.5 bg-primary-400 rounded-full wave-bar"
-                        style={{ 
-                          height: '100%',
-                          animationDelay: `${i * 0.1}s`,
-                        }}
-                      />
-                    ))}
+                {/* 歌词显示区域 - 单独一行在底部 */}
+                {currentLyric && (
+                  <div className="px-3 pb-2.5 border-t border-surface-700/50">
+                    <p className="text-xs text-primary-400 truncate text-center pt-2">
+                      {currentLyric.text || ' '}
+                    </p>
                   </div>
                 )}
-                
-                {/* 控制按钮 */}
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={togglePlay}
-                    disabled={isLoading || !currentStream}
-                    className="w-10 h-10 rounded-full bg-primary-500 text-surface-950 flex items-center justify-center hover:bg-primary-400 transition-colors disabled:opacity-50"
-                  >
-                    {isLoading ? (
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                    ) : isPlaying ? (
-                      <Pause className="w-5 h-5" fill="currentColor" />
-                    ) : (
-                      <Play className="w-5 h-5 ml-0.5" fill="currentColor" />
-                    )}
-                  </button>
-                  
-                  <button
-                    onClick={handleNext}
-                    className="w-10 h-10 flex items-center justify-center text-surface-300 hover:text-surface-100 transition-colors"
-                  >
-                    <SkipForward className="w-5 h-5" fill="currentColor" />
-                  </button>
-                </div>
-                
-                {/* 收缩按钮 */}
-                <button
-                  onClick={() => setCollapsed(true)}
-                  className="w-8 h-8 flex items-center justify-center text-surface-500 hover:text-surface-300 transition-colors"
-                >
-                  <ChevronRight className="w-5 h-5" />
-                </button>
               </div>
             </div>
           </motion.div>
