@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { motion } from 'framer-motion'
 import { 
   ChevronDown, 
@@ -68,7 +68,13 @@ export function Player({ onClose, onSeek }: PlayerProps) {
   const userScrollingRef = useRef(false) // 用户是否正在滚动
   const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null) // 滚动超时定时器
   const lastAutoScrollIndexRef = useRef(-1) // 上次自动滚动的歌词索引
-  const currentLyricIndex = getCurrentLyricIndex(lyrics, currentTime)
+  
+  // 使用 useMemo 确保 currentLyricIndex 正确计算
+  // 注意：currentTime 会频繁更新，但只有当索引真正变化时才需要重新渲染
+  const currentLyricIndex = useMemo(() => {
+    const index = getCurrentLyricIndex(lyrics, currentTime)
+    return index
+  }, [lyrics, currentTime])
 
   // 滚动到指定歌词行
   const scrollToLyric = useCallback((index: number, behavior: ScrollBehavior = 'smooth') => {
@@ -136,10 +142,12 @@ export function Player({ onClose, onSeek }: PlayerProps) {
     if (showLyricsOnly && lyrics.length > 0 && currentLyricIndex >= 0) {
       // 延迟一下确保DOM已渲染
       const timer = setTimeout(() => {
-        scrollToLyric(currentLyricIndex, 'smooth')
-        lastAutoScrollIndexRef.current = currentLyricIndex
-        userScrollingRef.current = false // 重置滚动标志
-      }, 100)
+        if (lyricContainerRef.current && !userScrollingRef.current) {
+          scrollToLyric(currentLyricIndex, 'smooth')
+          lastAutoScrollIndexRef.current = currentLyricIndex
+          userScrollingRef.current = false // 重置滚动标志
+        }
+      }, 150)
       return () => clearTimeout(timer)
     }
   }, [showLyricsOnly, lyrics.length, currentLyricIndex, scrollToLyric])
@@ -149,25 +157,42 @@ export function Player({ onClose, onSeek }: PlayerProps) {
     if (lyrics.length > 0 && currentLyricIndex >= 0 && !userScrollingRef.current) {
       // 延迟一下确保DOM已渲染
       const timer = setTimeout(() => {
-        scrollToLyric(currentLyricIndex, 'smooth')
-        lastAutoScrollIndexRef.current = currentLyricIndex
-      }, 100)
+        if (lyricContainerRef.current && !userScrollingRef.current) {
+          scrollToLyric(currentLyricIndex, 'smooth')
+          lastAutoScrollIndexRef.current = currentLyricIndex
+        }
+      }, 150)
       return () => clearTimeout(timer)
     }
   }, [lyrics.length, currentLyricIndex, scrollToLyric])
 
   // 自动滚动到当前歌词行（仅在用户未主动滚动时）
+  // 这是主要的自动滚动逻辑，响应 currentTime 的变化
   useEffect(() => {
-    if (
-      lyricContainerRef.current && 
-      currentLyricIndex >= 0 && 
-      !userScrollingRef.current &&
-      currentLyricIndex !== lastAutoScrollIndexRef.current
-    ) {
-      scrollToLyric(currentLyricIndex, 'smooth')
-      lastAutoScrollIndexRef.current = currentLyricIndex
+    // 只有在有歌词且索引有效时才滚动
+    if (lyrics.length === 0 || currentLyricIndex < 0) {
+      return
     }
-  }, [currentLyricIndex, currentTime, scrollToLyric])
+    
+    // 如果用户正在滚动，不自动滚动
+    if (userScrollingRef.current) {
+      return
+    }
+    
+    // 如果索引没有变化，不重复滚动
+    if (currentLyricIndex === lastAutoScrollIndexRef.current) {
+      return
+    }
+    
+    // 确保容器存在
+    if (!lyricContainerRef.current) {
+      return
+    }
+    
+    // 执行滚动（不延迟，确保及时响应）
+    scrollToLyric(currentLyricIndex, 'smooth')
+    lastAutoScrollIndexRef.current = currentLyricIndex
+  }, [currentLyricIndex, scrollToLyric])
 
   // 清理定时器
   useEffect(() => {
