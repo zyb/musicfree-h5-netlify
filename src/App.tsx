@@ -52,30 +52,32 @@ function App() {
   
   // 解析音频流
   const resolveStream = useCallback(async () => {
-    if (!currentTrack) {
+    // 使用最新的 currentTrack（从 store 中获取）
+    const track = usePlayerStore.getState().currentTrack
+    if (!track) {
       console.log('[歌词调试] resolveStream: currentTrack 为空')
       return
     }
     
     // 防止重复调用：如果正在解析同一个 track，直接返回
-    if (resolvingStreamRef.current === currentTrack.id) {
+    if (resolvingStreamRef.current === track.id) {
       console.log('[歌词调试] resolveStream: 正在解析中，跳过重复调用')
       return
     }
     
     // 标记开始解析
-    resolvingStreamRef.current = currentTrack.id
+    resolvingStreamRef.current = track.id
     
     console.log('[歌词调试] resolveStream 开始，currentTrack:', {
-      id: currentTrack.id,
-      title: currentTrack.title,
-      extra: currentTrack.extra,
+      id: track.id,
+      title: track.title,
+      extra: track.extra,
     })
     
     try {
-      if (currentTrack.streamUrl) {
-        console.log('[歌词调试] 使用 streamUrl:', currentTrack.streamUrl)
-        setCurrentStream({ url: currentTrack.streamUrl })
+      if (track.streamUrl) {
+        console.log('[歌词调试] 使用 streamUrl:', track.streamUrl)
+        setCurrentStream({ url: track.streamUrl })
         resolvingStreamRef.current = null
         return
       }
@@ -84,7 +86,7 @@ function App() {
       const host = (globalThis as any).MusicFreeH5
       console.log('[歌词调试] host 存在:', !!host)
       
-      if (host && currentTrack.extra) {
+      if (host && track.extra) {
         const loadedPlugins = host.getLoadedPlugins?.() || []
         const activePluginId = usePluginStore.getState().activePluginId
         console.log('[歌词调试] activePluginId:', activePluginId, 'loadedPlugins 数量:', loadedPlugins.length)
@@ -100,7 +102,7 @@ function App() {
               try {
                 console.log(`[歌词调试] 尝试获取媒体源，quality: ${quality}`)
                 // getMediaSource 可能返回包含 lrc 的完整数据
-                const result = await activePlugin.instance.getMediaSource(currentTrack.extra as any, quality)
+                const result = await activePlugin.instance.getMediaSource(track.extra as any, quality)
                 console.log(`[歌词调试] getMediaSource 返回结果 (quality: ${quality}):`, {
                   url: result?.url,
                   hasLrc: !!(result as any)?.lrc,
@@ -159,7 +161,7 @@ function App() {
       
       setIsLoading(true)
       try {
-        const stream = await plugin.resolveStream(currentTrack) as { url: string; _lrc?: string }
+        const stream = await plugin.resolveStream(track) as { url: string; _lrc?: string }
         console.log('[歌词调试] 插件 resolveStream 返回:', {
           url: stream?.url,
           hasLrc: !!stream?._lrc,
@@ -191,17 +193,20 @@ function App() {
       }
     } finally {
       // 确保在函数结束时清除标记（如果还没有清除）
-      if (resolvingStreamRef.current === currentTrack.id) {
+      const finalTrack = usePlayerStore.getState().currentTrack
+      if (finalTrack && resolvingStreamRef.current === finalTrack.id) {
         resolvingStreamRef.current = null
       }
     }
-  }, [currentTrack, getActivePluginInstance, setCurrentStream, setError, setIsLoading, updateCurrentTrackExtra, setLyrics])
+  }, [getActivePluginInstance, setCurrentStream, setError, setIsLoading, updateCurrentTrackExtra, setLyrics])
   
   // 获取歌词（从 track.extra 或缓存中读取）
   const fetchLyrics = useCallback(() => {
-    console.log('[歌词调试] fetchLyrics 被调用')
+    // 使用最新的 currentTrack（从 store 中获取）
+    const track = usePlayerStore.getState().currentTrack
+    console.log('[歌词调试] fetchLyrics 被调用，currentTrack:', track?.id, track?.title)
     
-    if (!currentTrack) {
+    if (!track) {
       console.log('[歌词调试] fetchLyrics: currentTrack 为空')
       setLyrics([])
       return
@@ -209,8 +214,8 @@ function App() {
 
     try {
       // 首先从 track.extra 中读取 lrc 字段
-      const extra = currentTrack.extra as { lrc?: string; rid?: string; [key: string]: unknown } | undefined
-      console.log('[歌词调试] fetchLyrics - currentTrack.extra:', {
+      const extra = track.extra as { lrc?: string; rid?: string; [key: string]: unknown } | undefined
+      console.log('[歌词调试] fetchLyrics - track.extra:', {
         hasExtra: !!extra,
         hasLrc: !!extra?.lrc,
         lrcType: typeof extra?.lrc,
@@ -228,9 +233,9 @@ function App() {
         // 还要尝试从 extra 中查找可能的 QQ 音乐 ID
         const possibleIds = [
           extra?.rid,
-          currentTrack.id,
+          track.id,
           String(extra?.rid || ''),
-          String(currentTrack.id),
+          String(track.id),
           // 尝试从 extra 中查找可能的 songmid 或其他 ID 字段
           (extra as any)?.songmid,
           String((extra as any)?.songmid || ''),
@@ -312,20 +317,22 @@ function App() {
       console.error('[歌词调试] fetchLyrics 错误:', error)
       setLyrics([])
     }
-  }, [currentTrack, setLyrics, updateCurrentTrackExtra])
+  }, [setLyrics, updateCurrentTrackExtra])
 
   // 监听歌词更新事件
   useEffect(() => {
     const handleLyricUpdated = (event: CustomEvent<{ trackId: string; lrc: string; rid?: string; urlId?: string }>) => {
       console.log('[歌词调试] 收到歌词更新事件:', event.detail)
-      if (!currentTrack) {
+      // 使用最新的 currentTrack（从 store 中获取）
+      const track = usePlayerStore.getState().currentTrack
+      if (!track) {
         console.log('[歌词调试] 当前没有播放歌曲，忽略歌词更新事件')
         return
       }
       
-      const extra = currentTrack.extra as { rid?: string; [key: string]: unknown } | undefined
+      const extra = track.extra as { rid?: string; [key: string]: unknown } | undefined
       const currentRid = extra?.rid
-      const currentId = currentTrack.id
+      const currentId = track.id
       const eventTrackId = event.detail.trackId
       const eventRid = event.detail.rid || event.detail.trackId
       const eventUrlId = event.detail.urlId
@@ -342,7 +349,8 @@ function App() {
       
       // 匹配逻辑：如果当前正在解析流（没有 currentStream），或者 id/rid 任一匹配，就接受歌词
       // 这样可以处理解析流时的情况，即使 ID 不完全匹配
-      const isResolvingStream = !currentStream
+      const currentStreamState = usePlayerStore.getState().currentStream
+      const isResolvingStream = !currentStreamState
       const idMatches = currentId === eventTrackId || currentId === eventRid || currentId === eventUrlId
       const ridMatches = currentRid === eventTrackId || currentRid === eventRid || currentRid === eventUrlId
       
@@ -365,13 +373,14 @@ function App() {
     return () => {
       window.removeEventListener('lyricUpdated', handleLyricUpdated as EventListener)
     }
-  }, [currentTrack, currentStream, updateCurrentTrackExtra, fetchLyrics])
+  }, [updateCurrentTrackExtra, fetchLyrics])
 
   // 当 currentTrack 改变时解析流和获取歌词
   useEffect(() => {
     if (!currentTrack) {
       // 如果没有当前歌曲，清空歌词
       setLyrics([])
+      resolvingStreamRef.current = null
       return
     }
     
@@ -407,7 +416,7 @@ function App() {
       }, 100)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTrack?.id]) // 只依赖 track id，确保切换歌曲时一定会触发
+  }, [currentTrack?.id, currentStream]) // 依赖 track id 和 currentStream
   
   // 当 currentStream 改变时加载音频
   useEffect(() => {
