@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Play, Pause, SkipForward, Loader2, Music, ChevronRight, ChevronLeft } from 'lucide-react'
 import { usePlayerStore } from '../stores/playerStore'
-import { getCurrentLyric } from '../utils/lyricParser'
+import { getDisplayLyric } from '../utils/lyricParser'
 
 interface MiniPlayerProps {
   onExpand: () => void
@@ -23,7 +23,7 @@ export function MiniPlayer({ onExpand }: MiniPlayerProps) {
     playNext,
   } = usePlayerStore()
 
-  const currentLyric = getCurrentLyric(lyrics, currentTime)
+  const displayLyric = getDisplayLyric(lyrics, currentTime)
   
   const togglePlay = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -226,10 +226,14 @@ export function MiniPlayer({ onExpand }: MiniPlayerProps) {
                 </div>
                 
                 {/* 歌词显示区域 - 单独一行在底部 */}
-                {currentLyric && (
+                {displayLyric && (
                   <div className="px-3 pb-2.5 border-t border-surface-700/50">
-                    <p className="text-xs text-primary-400 truncate text-center pt-2">
-                      {currentLyric.text || ' '}
+                    <p className={`text-xs truncate text-center pt-2 ${
+                      displayLyric.isActive 
+                        ? 'text-primary-400' 
+                        : 'text-surface-300'
+                    }`}>
+                      {displayLyric.lyric.text || ' '}
                     </p>
                   </div>
                 )}

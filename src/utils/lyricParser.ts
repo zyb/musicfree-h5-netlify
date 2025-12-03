@@ -79,3 +79,47 @@ export function getCurrentLyric(lyrics: LyricLine[], currentTime: number): Lyric
   return index >= 0 ? lyrics[index] : null
 }
 
+/**
+ * 获取要显示的歌词行（用于播放栏显示）
+ * 如果当前时间有对应的歌词，返回当前歌词
+ * 如果当前时间没有对应的歌词，但下一句歌词存在，返回下一句歌词
+ * @param lyrics 歌词行数组
+ * @param currentTime 当前播放时间（秒）
+ * @returns 包含歌词行和是否激活的对象，如果没有返回 null
+ */
+export function getDisplayLyric(lyrics: LyricLine[], currentTime: number): { lyric: LyricLine; isActive: boolean } | null {
+  if (lyrics.length === 0) return null
+  
+  // 获取当前歌词索引
+  const currentIndex = getCurrentLyricIndex(lyrics, currentTime)
+  
+  // 如果有当前歌词，返回当前歌词（激活状态）
+  if (currentIndex >= 0) {
+    return {
+      lyric: lyrics[currentIndex],
+      isActive: true,
+    }
+  }
+  
+  // 如果没有当前歌词，尝试返回下一句歌词（非激活状态）
+  // 找到第一个时间大于当前时间的歌词
+  for (let i = 0; i < lyrics.length; i++) {
+    if (lyrics[i].time > currentTime) {
+      return {
+        lyric: lyrics[i],
+        isActive: false,
+      }
+    }
+  }
+  
+  // 如果所有歌词的时间都小于当前时间，返回最后一句（非激活状态）
+  if (lyrics.length > 0) {
+    return {
+      lyric: lyrics[lyrics.length - 1],
+      isActive: false,
+    }
+  }
+  
+  return null
+}
+
