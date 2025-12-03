@@ -407,9 +407,17 @@ const createHostApi = (
   console: createPluginConsole(descriptor.name),
 })
 
+// 全局歌词缓存：key 是歌曲 ID，value 是歌词文本
+const lyricCache = new Map<string, string>()
+
+// 获取歌词缓存的函数（供外部调用）
+export const getLyricFromCache = (trackId: string): string | undefined => {
+  return lyricCache.get(trackId)
+}
+
 // 创建 axios 兼容的模拟实现
 const createAxiosShim = (_proxiedFetch: typeof fetch) => {
-  const processResponse = async (response: Response) => {
+  const processResponse = async (response: Response, requestUrl?: string) => {
     const contentType = response.headers.get('content-type') || ''
     let data: unknown
     
@@ -422,6 +430,58 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
       }
     } else {
       data = text
+    }
+    
+    // 拦截 qq_song_kw.php 请求，提取歌词
+    if (requestUrl && requestUrl.includes('qq_song_kw.php')) {
+      console.log('[歌词调试] 检测到 qq_song_kw.php 请求，检查响应数据')
+      console.log('[歌词调试] 响应数据类型:', typeof data, '是否为对象:', typeof data === 'object', '是否有 data 字段:', data && typeof data === 'object' && 'data' in data)
+      
+      if (data && typeof data === 'object' && 'data' in data) {
+        const responseData = data as { 
+          code?: number
+          msg?: string
+          data?: { 
+            lrc?: string
+            rid?: string
+            name?: string
+            artist?: string
+            [key: string]: unknown 
+          } 
+        }
+        
+        console.log('[歌词调试] 响应数据结构:', {
+          code: responseData.code,
+          msg: responseData.msg,
+          hasData: !!responseData.data,
+          dataKeys: responseData.data ? Object.keys(responseData.data) : [],
+          hasLrc: !!responseData.data?.lrc,
+          lrcType: typeof responseData.data?.lrc,
+          lrcLength: typeof responseData.data?.lrc === 'string' ? responseData.data.lrc.length : 0,
+          rid: responseData.data?.rid,
+        })
+        
+        if (responseData.data?.lrc && typeof responseData.data.lrc === 'string') {
+          const trackId = responseData.data.rid || ''
+          if (trackId) {
+            console.log('[歌词调试] 从 qq_song_kw.php 响应中提取到歌词，trackId:', trackId, '歌词长度:', responseData.data.lrc.length, '歌词预览:', responseData.data.lrc.substring(0, 100))
+            lyricCache.set(String(trackId), responseData.data.lrc)
+            // 触发全局事件，通知 App.tsx 更新歌词
+            if (typeof window !== 'undefined') {
+              console.log('[歌词调试] 触发 lyricUpdated 事件，trackId:', trackId)
+              window.dispatchEvent(new CustomEvent('lyricUpdated', { 
+                detail: { trackId: String(trackId), lrc: responseData.data.lrc, rid: String(trackId) } 
+              }))
+            }
+          } else {
+            console.warn('[歌词调试] 响应中有歌词但没有 rid 字段')
+          }
+        } else {
+          console.log('[歌词调试] 响应中没有 lrc 字段或 lrc 不是字符串')
+        }
+      } else {
+        console.log('[歌词调试] 响应数据格式不正确，不是预期的对象格式')
+      }
     }
     
     return {
@@ -489,7 +549,7 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
     
     try {
       const response = await fetch(finalUrl, init)
-      const result = await processResponse(response)
+      const result = await processResponse(response, url) // 传递原始 URL 用于检测
       
       // 记录响应
       const dataPreview = typeof result.data === 'string' 
@@ -1337,8 +1397,42 @@ const adaptMusicFreePlugin = (
         for (const quality of qualities) {
           try {
             const result = await native.getMediaSource(track.extra as MusicFreeTrack, quality)
-            if (result?.url) {
-              return { url: result.url }
+            console.log('[歌词调试] pluginHost resolveStream - getMediaSource 返回:', {
+              url: result?.url,
+              hasLrc: !!(result as any)?.lrc,
+              lrcLength: (result as any)?.lrc?.length,
+              hasData: !!(result as any)?.data,
+              dataLrc: !!(result as any)?.data?.lrc,
+              fullResult: result,
+            })
+            
+            // 处理返回的数据结构：可能是 { url, lrc } 或 { data: { url, lrc } }
+            let url: string | undefined
+            let lrc: string | undefined
+            
+            if ((result as any)?.data) {
+              // 如果返回的是 { data: { url, lrc, ... } } 格式
+              const data = (result as any).data
+              url = data.url
+              lrc = data.lrc
+            } else {
+              // 如果返回的是 { url, lrc, ... } 格式
+              url = result?.url
+              lrc = (result as any)?.lrc
+            }
+            
+            if (url) {
+              // 如果返回的数据中包含 lrc，需要保存到 track.extra 中
+              // 但是这里无法直接更新 track，所以返回一个包含 lrc 的对象
+              if (lrc) {
+                console.log('[歌词调试] pluginHost 找到歌词，长度:', lrc.length)
+                // 返回包含 lrc 的对象，让调用者知道有歌词数据
+                return { 
+                  url: url,
+                  _lrc: lrc, // 使用 _lrc 作为临时字段
+                } as any
+              }
+              return { url: url }
             }
           } catch {
             continue

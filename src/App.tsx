@@ -10,6 +10,7 @@ import { PlaylistView } from './components/PlaylistView'
 import { PluginManager } from './components/PluginManager'
 import { MiniPlayer } from './components/MiniPlayer'
 import { parseLRC } from './utils/lyricParser'
+import { getLyricFromCache } from './lib/pluginHost'
 
 type TabId = 'search' | 'playlist' | 'plugins'
 
@@ -143,9 +144,29 @@ function App() {
     
     setIsLoading(true)
     try {
-      const stream = await plugin.resolveStream(currentTrack)
-      console.log('[歌词调试] 插件 resolveStream 返回:', stream)
-      setCurrentStream(stream)
+      const stream = await plugin.resolveStream(currentTrack) as { url: string; _lrc?: string }
+      console.log('[歌词调试] 插件 resolveStream 返回:', {
+        url: stream?.url,
+        hasLrc: !!stream?._lrc,
+        lrcLength: stream?._lrc?.length,
+        lrcPreview: stream?._lrc?.substring(0, 100),
+      })
+      
+      // 如果返回的数据中包含 _lrc（临时字段），提取并保存
+      if (stream?._lrc) {
+        console.log('[歌词调试] 从 resolveStream 返回中提取到歌词，长度:', stream._lrc.length)
+        updateCurrentTrackExtra({ lrc: stream._lrc })
+        // 立即解析歌词
+        const lyrics = parseLRC(stream._lrc)
+        console.log('[歌词调试] 解析歌词结果，行数:', lyrics.length)
+        if (lyrics.length > 0) {
+          setLyrics(lyrics)
+          console.log('[歌词调试] 歌词已设置到 store')
+        }
+      }
+      
+      // 只传递 url 给 setCurrentStream
+      setCurrentStream({ url: stream.url })
     } catch (error) {
       console.error('[歌词调试] 插件 resolveStream 错误:', error)
       setError(error instanceof Error ? error.message : '解析失败')
@@ -154,7 +175,7 @@ function App() {
     }
   }, [currentTrack, getActivePluginInstance, setCurrentStream, setError, setIsLoading, updateCurrentTrackExtra, setLyrics])
   
-  // 获取歌词（从 track.extra 中读取）
+  // 获取歌词（从 track.extra 或缓存中读取）
   const fetchLyrics = useCallback(() => {
     console.log('[歌词调试] fetchLyrics 被调用')
     
@@ -165,8 +186,8 @@ function App() {
     }
 
     try {
-      // 直接从 track.extra 中读取 lrc 字段
-      const extra = currentTrack.extra as { lrc?: string; [key: string]: unknown } | undefined
+      // 首先从 track.extra 中读取 lrc 字段
+      const extra = currentTrack.extra as { lrc?: string; rid?: string; [key: string]: unknown } | undefined
       console.log('[歌词调试] fetchLyrics - currentTrack.extra:', {
         hasExtra: !!extra,
         hasLrc: !!extra?.lrc,
@@ -174,10 +195,43 @@ function App() {
         lrcLength: typeof extra?.lrc === 'string' ? extra.lrc.length : 0,
         lrcPreview: typeof extra?.lrc === 'string' ? extra.lrc.substring(0, 100) : undefined,
         extraKeys: extra ? Object.keys(extra) : [],
+        rid: extra?.rid,
       })
       
-      if (extra?.lrc) {
-        const lrcText = extra.lrc
+      let lrcText: string | undefined = extra?.lrc
+      
+      // 如果 extra 中没有 lrc，尝试从缓存中获取
+      if (!lrcText) {
+        // 尝试多个可能的 trackId：rid、id、以及它们的字符串形式
+        const possibleIds = [
+          extra?.rid,
+          currentTrack.id,
+          String(extra?.rid || ''),
+          String(currentTrack.id),
+        ].filter(Boolean) as string[]
+        
+        console.log('[歌词调试] 尝试从缓存获取歌词，可能的 trackId:', possibleIds)
+        
+        for (const trackId of possibleIds) {
+          lrcText = getLyricFromCache(trackId)
+          if (lrcText) {
+            console.log('[歌词调试] 从缓存中找到歌词，使用的 trackId:', trackId, '歌词长度:', lrcText.length)
+            // 保存到 track.extra 中，同时保存 rid（如果找到了）
+            const updateData: { lrc: string; rid?: string } = { lrc: lrcText }
+            if (extra?.rid || trackId === extra?.rid || trackId === String(extra?.rid)) {
+              updateData.rid = extra?.rid || trackId
+            }
+            updateCurrentTrackExtra(updateData)
+            break
+          }
+        }
+        
+        if (!lrcText) {
+          console.log('[歌词调试] 缓存中也没有找到歌词')
+        }
+      }
+      
+      if (lrcText) {
         console.log('[歌词调试] 找到 lrc 文本，长度:', lrcText.length, '前100字符:', lrcText.substring(0, 100))
         
         if (lrcText && typeof lrcText === 'string' && lrcText.trim()) {
@@ -195,7 +249,7 @@ function App() {
           console.warn('[歌词调试] lrc 文本无效:', { lrcText, type: typeof lrcText, isEmpty: !lrcText?.trim() })
         }
       } else {
-        console.log('[歌词调试] extra 中没有 lrc 字段')
+        console.log('[歌词调试] 没有找到歌词（extra 和缓存都没有）')
       }
 
       // 如果没有找到歌词，清空
@@ -205,7 +259,54 @@ function App() {
       console.error('[歌词调试] fetchLyrics 错误:', error)
       setLyrics([])
     }
-  }, [currentTrack, setLyrics])
+  }, [currentTrack, setLyrics, updateCurrentTrackExtra])
+
+  // 监听歌词更新事件
+  useEffect(() => {
+    const handleLyricUpdated = (event: CustomEvent<{ trackId: string; lrc: string; rid?: string }>) => {
+      console.log('[歌词调试] 收到歌词更新事件:', event.detail)
+      if (!currentTrack) {
+        console.log('[歌词调试] 当前没有播放歌曲，忽略歌词更新事件')
+        return
+      }
+      
+      const extra = currentTrack.extra as { rid?: string; [key: string]: unknown } | undefined
+      const currentRid = extra?.rid
+      const currentId = currentTrack.id
+      const eventTrackId = event.detail.trackId
+      const eventRid = event.detail.rid || event.detail.trackId
+      
+      console.log('[歌词调试] 匹配检查:', {
+        currentId,
+        currentRid,
+        eventTrackId,
+        eventRid,
+        idMatch: currentId === eventTrackId || currentId === eventRid,
+        ridMatch: currentRid === eventTrackId || currentRid === eventRid,
+      })
+      
+      // 匹配逻辑：id 或 rid 任一匹配即可
+      if (currentId === eventTrackId || currentId === eventRid || 
+          currentRid === eventTrackId || currentRid === eventRid) {
+        console.log('[歌词调试] 歌词更新事件匹配当前歌曲，更新歌词')
+        // 同时更新 lrc 和 rid（如果事件中有 rid）
+        const updateData: { lrc: string; rid?: string } = { lrc: event.detail.lrc }
+        if (eventRid) {
+          updateData.rid = eventRid
+        }
+        updateCurrentTrackExtra(updateData)
+        // 延迟一下确保 extra 已更新
+        setTimeout(() => fetchLyrics(), 50)
+      } else {
+        console.log('[歌词调试] 歌词更新事件不匹配当前歌曲，忽略')
+      }
+    }
+    
+    window.addEventListener('lyricUpdated', handleLyricUpdated as EventListener)
+    return () => {
+      window.removeEventListener('lyricUpdated', handleLyricUpdated as EventListener)
+    }
+  }, [currentTrack, updateCurrentTrackExtra, fetchLyrics])
 
   // 当 currentTrack 改变时解析流和获取歌词
   useEffect(() => {
