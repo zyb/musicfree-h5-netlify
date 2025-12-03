@@ -50,19 +50,34 @@ function App() {
   
   // 解析音频流
   const resolveStream = useCallback(async () => {
-    if (!currentTrack) return
+    if (!currentTrack) {
+      console.log('[歌词调试] resolveStream: currentTrack 为空')
+      return
+    }
+    
+    console.log('[歌词调试] resolveStream 开始，currentTrack:', {
+      id: currentTrack.id,
+      title: currentTrack.title,
+      extra: currentTrack.extra,
+    })
     
     if (currentTrack.streamUrl) {
+      console.log('[歌词调试] 使用 streamUrl:', currentTrack.streamUrl)
       setCurrentStream({ url: currentTrack.streamUrl })
       return
     }
     
     // 尝试直接调用原生插件的 getMediaSource，以获取完整数据（包括歌词）
     const host = (globalThis as any).MusicFreeH5
+    console.log('[歌词调试] host 存在:', !!host)
+    
     if (host && currentTrack.extra) {
       const loadedPlugins = host.getLoadedPlugins?.() || []
       const activePluginId = usePluginStore.getState().activePluginId
+      console.log('[歌词调试] activePluginId:', activePluginId, 'loadedPlugins 数量:', loadedPlugins.length)
+      
       const activePlugin = loadedPlugins.find((p: any) => p.meta?.id === activePluginId)
+      console.log('[歌词调试] activePlugin 找到:', !!activePlugin, '有 getMediaSource:', !!activePlugin?.instance?.getMediaSource)
       
       if (activePlugin?.instance?.getMediaSource) {
         setIsLoading(true)
@@ -70,27 +85,46 @@ function App() {
           const qualities = ['128', 'standard', '320', 'high', 'low', 'super']
           for (const quality of qualities) {
             try {
+              console.log(`[歌词调试] 尝试获取媒体源，quality: ${quality}`)
               // getMediaSource 可能返回包含 lrc 的完整数据
               const result = await activePlugin.instance.getMediaSource(currentTrack.extra as any, quality)
+              console.log(`[歌词调试] getMediaSource 返回结果 (quality: ${quality}):`, {
+                url: result?.url,
+                hasLrc: !!(result as any)?.lrc,
+                lrcLength: (result as any)?.lrc?.length,
+                lrcPreview: (result as any)?.lrc?.substring(0, 100),
+                fullResult: result,
+              })
+              
               if (result?.url) {
                 // 如果返回的数据中包含 lrc，更新 track 的 extra
-                if (result.lrc && typeof result.lrc === 'string') {
-                  updateCurrentTrackExtra({ lrc: result.lrc })
+                const resultWithLrc = result as { url: string; lrc?: string; [key: string]: unknown }
+                if (resultWithLrc.lrc && typeof resultWithLrc.lrc === 'string') {
+                  console.log('[歌词调试] 找到歌词，更新 track.extra，歌词长度:', resultWithLrc.lrc.length)
+                  updateCurrentTrackExtra({ lrc: resultWithLrc.lrc })
                   // 立即解析歌词
-                  const lyrics = parseLRC(result.lrc)
+                  const lyrics = parseLRC(resultWithLrc.lrc)
+                  console.log('[歌词调试] 解析歌词结果，行数:', lyrics.length, '前3行:', lyrics.slice(0, 3))
                   if (lyrics.length > 0) {
                     setLyrics(lyrics)
+                    console.log('[歌词调试] 歌词已设置到 store')
+                  } else {
+                    console.warn('[歌词调试] 解析后的歌词为空')
                   }
+                } else {
+                  console.log('[歌词调试] 返回结果中没有 lrc 字段')
                 }
                 setCurrentStream({ url: result.url })
                 setIsLoading(false)
                 return
               }
-            } catch {
+            } catch (error) {
+              console.log(`[歌词调试] getMediaSource 失败 (quality: ${quality}):`, error)
               continue
             }
           }
         } catch (error) {
+          console.error('[歌词调试] resolveStream 错误:', error)
           setError(error instanceof Error ? error.message : '解析失败')
         } finally {
           setIsLoading(false)
@@ -99,8 +133,10 @@ function App() {
     }
     
     // 回退到使用插件的 resolveStream 方法
+    console.log('[歌词调试] 回退到使用插件的 resolveStream 方法')
     const plugin = getActivePluginInstance()
     if (!plugin?.resolveStream) {
+      console.error('[歌词调试] 插件没有 resolveStream 方法')
       setError('无法解析音频地址')
       return
     }
@@ -108,8 +144,10 @@ function App() {
     setIsLoading(true)
     try {
       const stream = await plugin.resolveStream(currentTrack)
+      console.log('[歌词调试] 插件 resolveStream 返回:', stream)
       setCurrentStream(stream)
     } catch (error) {
+      console.error('[歌词调试] 插件 resolveStream 错误:', error)
       setError(error instanceof Error ? error.message : '解析失败')
     } finally {
       setIsLoading(false)
@@ -118,7 +156,10 @@ function App() {
   
   // 获取歌词（从 track.extra 中读取）
   const fetchLyrics = useCallback(() => {
+    console.log('[歌词调试] fetchLyrics 被调用')
+    
     if (!currentTrack) {
+      console.log('[歌词调试] fetchLyrics: currentTrack 为空')
       setLyrics([])
       return
     }
@@ -126,22 +167,42 @@ function App() {
     try {
       // 直接从 track.extra 中读取 lrc 字段
       const extra = currentTrack.extra as { lrc?: string; [key: string]: unknown } | undefined
+      console.log('[歌词调试] fetchLyrics - currentTrack.extra:', {
+        hasExtra: !!extra,
+        hasLrc: !!extra?.lrc,
+        lrcType: typeof extra?.lrc,
+        lrcLength: typeof extra?.lrc === 'string' ? extra.lrc.length : 0,
+        lrcPreview: typeof extra?.lrc === 'string' ? extra.lrc.substring(0, 100) : undefined,
+        extraKeys: extra ? Object.keys(extra) : [],
+      })
       
       if (extra?.lrc) {
         const lrcText = extra.lrc
+        console.log('[歌词调试] 找到 lrc 文本，长度:', lrcText.length, '前100字符:', lrcText.substring(0, 100))
+        
         if (lrcText && typeof lrcText === 'string' && lrcText.trim()) {
           const lyrics = parseLRC(lrcText)
+          console.log('[歌词调试] 解析歌词结果，行数:', lyrics.length)
           if (lyrics.length > 0) {
+            console.log('[歌词调试] 前5行歌词:', lyrics.slice(0, 5))
             setLyrics(lyrics)
+            console.log('[歌词调试] 歌词已设置到 store')
             return
+          } else {
+            console.warn('[歌词调试] 解析后的歌词为空，原始文本:', lrcText.substring(0, 200))
           }
+        } else {
+          console.warn('[歌词调试] lrc 文本无效:', { lrcText, type: typeof lrcText, isEmpty: !lrcText?.trim() })
         }
+      } else {
+        console.log('[歌词调试] extra 中没有 lrc 字段')
       }
 
       // 如果没有找到歌词，清空
+      console.log('[歌词调试] 没有找到歌词，清空歌词列表')
       setLyrics([])
     } catch (error) {
-      // 静默失败
+      console.error('[歌词调试] fetchLyrics 错误:', error)
       setLyrics([])
     }
   }, [currentTrack, setLyrics])

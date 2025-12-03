@@ -122,18 +122,26 @@ export const usePlayerStore = create<PlayerState>()(
         }
         set({ currentTrack: track, currentStream: null, error: null, currentTime: 0, duration: 0, lyrics: [] })
       },
-      updateCurrentTrackExtra: (extra) => set((state) => {
-        if (!state.currentTrack) return state
-        return {
-          currentTrack: {
-            ...state.currentTrack,
-            extra: {
-              ...state.currentTrack.extra,
-              ...extra,
+      updateCurrentTrackExtra: (extra) => {
+        console.log('[歌词调试] updateCurrentTrackExtra 被调用，extra:', extra)
+        set((state) => {
+          if (!state.currentTrack) {
+            console.log('[歌词调试] updateCurrentTrackExtra: currentTrack 为空')
+            return state
+          }
+          const newExtra = {
+            ...state.currentTrack.extra,
+            ...extra,
+          }
+          console.log('[歌词调试] updateCurrentTrackExtra: 更新后的 extra 包含 lrc:', !!newExtra?.lrc)
+          return {
+            currentTrack: {
+              ...state.currentTrack,
+              extra: newExtra,
             },
-          },
-        }
-      }),
+          }
+        })
+      },
       setCurrentStream: (stream) => set({ currentStream: stream }),
       setIsPlaying: (playing) => set({ isPlaying: playing }),
       setIsLoading: (loading) => set({ isLoading: loading }),
