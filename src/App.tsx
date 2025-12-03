@@ -9,6 +9,7 @@ import { SearchView } from './components/SearchView'
 import { PlaylistView } from './components/PlaylistView'
 import { PluginManager } from './components/PluginManager'
 import { MiniPlayer } from './components/MiniPlayer'
+import { parseLRC } from './utils/lyricParser'
 
 type TabId = 'search' | 'playlist' | 'plugins'
 
@@ -38,6 +39,7 @@ function App() {
     setCurrentTime,
     setCurrentStream,
     setError,
+    setLyrics,
     playNext,
   } = usePlayerStore()
   
@@ -71,12 +73,60 @@ function App() {
     }
   }, [currentTrack, getActivePluginInstance, setCurrentStream, setError, setIsLoading])
   
-  // 当 currentTrack 改变时解析流
-  useEffect(() => {
-    if (currentTrack && !currentStream) {
-      resolveStream()
+  // 获取歌词
+  const fetchLyrics = useCallback(async () => {
+    if (!currentTrack) {
+      setLyrics([])
+      return
     }
-  }, [currentTrack, currentStream, resolveStream])
+
+    try {
+      // 首先检查 track.extra 中是否有 lrc 字段
+      const extra = currentTrack.extra as { lrc?: string } | undefined
+      if (extra?.lrc) {
+        const lyrics = parseLRC(extra.lrc)
+        setLyrics(lyrics)
+        return
+      }
+
+      // 尝试通过原生插件获取歌词
+      const host = (globalThis as any).MusicFreeH5
+      if (host && currentTrack.extra) {
+        const loadedPlugins = host.getLoadedPlugins?.() || []
+        const activePluginId = usePluginStore.getState().activePluginId
+        const activePlugin = loadedPlugins.find((p: any) => p.meta?.id === activePluginId)
+        
+        if (activePlugin?.instance?.getLyric) {
+          try {
+            const result = await activePlugin.instance.getLyric(currentTrack.extra as any)
+            if (result?.rawLrc) {
+              const lyrics = parseLRC(result.rawLrc)
+              setLyrics(lyrics)
+              return
+            }
+          } catch (error) {
+            console.warn('通过插件获取歌词失败:', error)
+          }
+        }
+      }
+
+      // 如果没有找到歌词，清空
+      setLyrics([])
+    } catch (error) {
+      console.error('获取歌词失败:', error)
+      setLyrics([])
+    }
+  }, [currentTrack, setLyrics])
+
+  // 当 currentTrack 改变时解析流和获取歌词
+  useEffect(() => {
+    if (currentTrack) {
+      if (!currentStream) {
+        resolveStream()
+      }
+      fetchLyrics()
+    }
+  }, [currentTrack, currentStream, resolveStream, fetchLyrics])
   
   // 当 currentStream 改变时加载音频
   useEffect(() => {

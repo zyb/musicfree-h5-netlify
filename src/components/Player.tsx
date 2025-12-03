@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { 
   ChevronDown, 
@@ -14,6 +15,7 @@ import {
   Loader2,
 } from 'lucide-react'
 import { usePlayerStore, PlayMode } from '../stores/playerStore'
+import { getCurrentLyricIndex } from '../utils/lyricParser'
 
 const formatTime = (seconds: number): string => {
   if (!seconds || !isFinite(seconds)) return '0:00'
@@ -52,6 +54,7 @@ export function Player({ onClose, onSeek }: PlayerProps) {
     volume,
     muted,
     playMode,
+    lyrics,
     setIsPlaying,
     setVolume,
     toggleMute,
@@ -59,6 +62,22 @@ export function Player({ onClose, onSeek }: PlayerProps) {
     playNext,
     playPrevious,
   } = usePlayerStore()
+
+  const lyricContainerRef = useRef<HTMLDivElement>(null)
+  const currentLyricIndex = getCurrentLyricIndex(lyrics, currentTime)
+
+  // 自动滚动到当前歌词行
+  useEffect(() => {
+    if (lyricContainerRef.current && currentLyricIndex >= 0) {
+      const lyricElement = lyricContainerRef.current.children[currentLyricIndex] as HTMLElement
+      if (lyricElement) {
+        lyricElement.scrollIntoView({
+          behavior: 'smooth',
+          block: 'center',
+        })
+      }
+    }
+  }, [currentLyricIndex])
   
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const time = parseFloat(e.target.value)
@@ -101,15 +120,16 @@ export function Player({ onClose, onSeek }: PlayerProps) {
         <div className="w-10" />
       </header>
       
-      {/* 封面 */}
-      <div className="flex-1 flex items-center justify-center px-8 py-6">
+      {/* 封面和歌词 */}
+      <div className="flex-1 flex flex-col items-center justify-center px-8 py-6 overflow-hidden">
+        {/* 封面 */}
         <motion.div
           animate={{ rotate: isPlaying ? 360 : 0 }}
           transition={{ duration: 12, repeat: Infinity, ease: 'linear' }}
           style={{ animationPlayState: isPlaying ? 'running' : 'paused' }}
-          className="relative"
+          className="relative flex-shrink-0 mb-4"
         >
-          <div className="w-64 h-64 sm:w-80 sm:h-80 rounded-full overflow-hidden shadow-2xl shadow-black/50 border-8 border-surface-800">
+          <div className="w-48 h-48 sm:w-64 sm:h-64 rounded-full overflow-hidden shadow-2xl shadow-black/50 border-8 border-surface-800">
             {currentTrack?.coverUrl ? (
               <img
                 src={currentTrack.coverUrl}
@@ -129,6 +149,37 @@ export function Player({ onClose, onSeek }: PlayerProps) {
             </div>
           </div>
         </motion.div>
+
+        {/* 歌词显示区域 */}
+        {lyrics.length > 0 ? (
+          <div 
+            ref={lyricContainerRef}
+            className="flex-1 w-full max-w-lg overflow-y-auto scrollbar-thin scrollbar-thumb-surface-700 scrollbar-track-transparent"
+            style={{ maxHeight: '40vh' }}
+          >
+            <div className="space-y-3 px-4 py-2">
+              {lyrics.map((line, index) => {
+                const isActive = index === currentLyricIndex
+                return (
+                  <div
+                    key={index}
+                    className={`text-center transition-all duration-300 ${
+                      isActive
+                        ? 'text-primary-400 text-lg font-medium scale-105'
+                        : 'text-surface-400 text-sm'
+                    }`}
+                  >
+                    {line.text || ' '}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-surface-500 text-sm">
+            暂无歌词
+          </div>
+        )}
       </div>
       
       {/* 歌曲信息 */}

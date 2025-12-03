@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { PluginTrack, PluginStream } from '../types/plugin'
+import type { LyricLine } from '../utils/lyricParser'
 
 export type PlayMode = 'sequence' | 'repeat' | 'shuffle' | 'single'
 
@@ -22,6 +23,9 @@ export interface PlayerState {
   
   // 播放历史
   playHistory: PluginTrack[]
+  
+  // 歌词
+  lyrics: LyricLine[]
   
   // 错误状态
   error: string | null
@@ -50,6 +54,9 @@ export interface PlayerState {
   clearHistory: () => void
   
   setError: (error: string | null) => void
+  
+  // 歌词操作
+  setLyrics: (lyrics: LyricLine[]) => void
   
   // 播放控制
   playNext: () => PluginTrack | null
@@ -104,6 +111,7 @@ export const usePlayerStore = create<PlayerState>()(
       playlist: [],
       playlistName: '播放列表',
       playHistory: [],
+      lyrics: [],
       error: null,
       
       setCurrentTrack: (track) => {
@@ -111,7 +119,7 @@ export const usePlayerStore = create<PlayerState>()(
         if (track) {
           get().addToHistory(track)
         }
-        set({ currentTrack: track, currentStream: null, error: null, currentTime: 0, duration: 0 })
+        set({ currentTrack: track, currentStream: null, error: null, currentTime: 0, duration: 0, lyrics: [] })
       },
       setCurrentStream: (stream) => set({ currentStream: stream }),
       setIsPlaying: (playing) => set({ isPlaying: playing }),
@@ -168,6 +176,8 @@ export const usePlayerStore = create<PlayerState>()(
       clearHistory: () => set({ playHistory: [] }),
       
       setError: (error) => set({ error }),
+      
+      setLyrics: (lyrics) => set({ lyrics }),
       
       playNext: () => {
         const { playlist, currentTrack, playMode } = get()

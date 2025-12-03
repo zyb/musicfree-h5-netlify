@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Play, Pause, SkipForward, Loader2, Music, ChevronRight, ChevronLeft } from 'lucide-react'
 import { usePlayerStore } from '../stores/playerStore'
+import { getCurrentLyric } from '../utils/lyricParser'
 
 interface MiniPlayerProps {
   onExpand: () => void
@@ -17,9 +18,12 @@ export function MiniPlayer({ onExpand }: MiniPlayerProps) {
     isLoading,
     duration,
     currentTime,
+    lyrics,
     setIsPlaying,
     playNext,
   } = usePlayerStore()
+
+  const currentLyric = getCurrentLyric(lyrics, currentTime)
   
   const togglePlay = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -181,9 +185,15 @@ export function MiniPlayer({ onExpand }: MiniPlayerProps) {
                   <h3 className="font-medium text-sm text-surface-100 truncate">
                     {currentTrack?.title || '未选择歌曲'}
                   </h3>
-                  <p className="text-xs text-surface-400 truncate">
-                    {currentTrack?.artists?.join(' / ') || '未知艺术家'}
-                  </p>
+                  {currentLyric ? (
+                    <p className="text-xs text-primary-400 truncate mt-0.5">
+                      {currentLyric.text}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-surface-400 truncate">
+                      {currentTrack?.artists?.join(' / ') || '未知艺术家'}
+                    </p>
+                  )}
                 </div>
                 
                 {/* 音波动画 */}
