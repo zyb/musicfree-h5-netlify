@@ -79,70 +79,71 @@ function App() {
         resolvingStreamRef.current = null
         return
       }
-    
-    // 尝试直接调用原生插件的 getMediaSource，以获取完整数据（包括歌词）
-    const host = (globalThis as any).MusicFreeH5
-    console.log('[歌词调试] host 存在:', !!host)
-    
-    if (host && currentTrack.extra) {
-      const loadedPlugins = host.getLoadedPlugins?.() || []
-      const activePluginId = usePluginStore.getState().activePluginId
-      console.log('[歌词调试] activePluginId:', activePluginId, 'loadedPlugins 数量:', loadedPlugins.length)
       
-      const activePlugin = loadedPlugins.find((p: any) => p.meta?.id === activePluginId)
-      console.log('[歌词调试] activePlugin 找到:', !!activePlugin, '有 getMediaSource:', !!activePlugin?.instance?.getMediaSource)
+      // 尝试直接调用原生插件的 getMediaSource，以获取完整数据（包括歌词）
+      const host = (globalThis as any).MusicFreeH5
+      console.log('[歌词调试] host 存在:', !!host)
       
-      if (activePlugin?.instance?.getMediaSource) {
-        setIsLoading(true)
-        try {
-          const qualities = ['128', 'standard', '320', 'high', 'low', 'super']
-          for (const quality of qualities) {
-            try {
-              console.log(`[歌词调试] 尝试获取媒体源，quality: ${quality}`)
-              // getMediaSource 可能返回包含 lrc 的完整数据
-              const result = await activePlugin.instance.getMediaSource(currentTrack.extra as any, quality)
-              console.log(`[歌词调试] getMediaSource 返回结果 (quality: ${quality}):`, {
-                url: result?.url,
-                hasLrc: !!(result as any)?.lrc,
-                lrcLength: (result as any)?.lrc?.length,
-                lrcPreview: (result as any)?.lrc?.substring(0, 100),
-                fullResult: result,
-              })
-              
-              if (result?.url) {
-                // 如果返回的数据中包含 lrc，更新 track 的 extra
-                const resultWithLrc = result as { url: string; lrc?: string; [key: string]: unknown }
-                if (resultWithLrc.lrc && typeof resultWithLrc.lrc === 'string') {
-                  console.log('[歌词调试] 找到歌词，更新 track.extra，歌词长度:', resultWithLrc.lrc.length)
-                  updateCurrentTrackExtra({ lrc: resultWithLrc.lrc })
-                  // 立即解析歌词
-                  const lyrics = parseLRC(resultWithLrc.lrc)
-                  console.log('[歌词调试] 解析歌词结果，行数:', lyrics.length, '前3行:', lyrics.slice(0, 3))
-                  if (lyrics.length > 0) {
-                    setLyrics(lyrics)
-                    console.log('[歌词调试] 歌词已设置到 store')
+      if (host && currentTrack.extra) {
+        const loadedPlugins = host.getLoadedPlugins?.() || []
+        const activePluginId = usePluginStore.getState().activePluginId
+        console.log('[歌词调试] activePluginId:', activePluginId, 'loadedPlugins 数量:', loadedPlugins.length)
+        
+        const activePlugin = loadedPlugins.find((p: any) => p.meta?.id === activePluginId)
+        console.log('[歌词调试] activePlugin 找到:', !!activePlugin, '有 getMediaSource:', !!activePlugin?.instance?.getMediaSource)
+        
+        if (activePlugin?.instance?.getMediaSource) {
+          setIsLoading(true)
+          try {
+            const qualities = ['128', 'standard', '320', 'high', 'low', 'super']
+            for (const quality of qualities) {
+              try {
+                console.log(`[歌词调试] 尝试获取媒体源，quality: ${quality}`)
+                // getMediaSource 可能返回包含 lrc 的完整数据
+                const result = await activePlugin.instance.getMediaSource(currentTrack.extra as any, quality)
+                console.log(`[歌词调试] getMediaSource 返回结果 (quality: ${quality}):`, {
+                  url: result?.url,
+                  hasLrc: !!(result as any)?.lrc,
+                  lrcLength: (result as any)?.lrc?.length,
+                  lrcPreview: (result as any)?.lrc?.substring(0, 100),
+                  fullResult: result,
+                })
+                
+                if (result?.url) {
+                  // 如果返回的数据中包含 lrc，更新 track 的 extra
+                  const resultWithLrc = result as { url: string; lrc?: string; [key: string]: unknown }
+                  if (resultWithLrc.lrc && typeof resultWithLrc.lrc === 'string') {
+                    console.log('[歌词调试] 找到歌词，更新 track.extra，歌词长度:', resultWithLrc.lrc.length)
+                    updateCurrentTrackExtra({ lrc: resultWithLrc.lrc })
+                    // 立即解析歌词
+                    const lyrics = parseLRC(resultWithLrc.lrc)
+                    console.log('[歌词调试] 解析歌词结果，行数:', lyrics.length, '前3行:', lyrics.slice(0, 3))
+                    if (lyrics.length > 0) {
+                      setLyrics(lyrics)
+                      console.log('[歌词调试] 歌词已设置到 store')
+                    } else {
+                      console.warn('[歌词调试] 解析后的歌词为空')
+                    }
                   } else {
-                    console.warn('[歌词调试] 解析后的歌词为空')
+                    console.log('[歌词调试] 返回结果中没有 lrc 字段')
                   }
-                } else {
-                  console.log('[歌词调试] 返回结果中没有 lrc 字段')
+                  setCurrentStream({ url: result.url })
+                  setIsLoading(false)
+                  resolvingStreamRef.current = null
+                  return
                 }
-                setCurrentStream({ url: result.url })
-                setIsLoading(false)
-                resolvingStreamRef.current = null
-                return
+              } catch (error) {
+                console.log(`[歌词调试] getMediaSource 失败 (quality: ${quality}):`, error)
+                continue
               }
-            } catch (error) {
-              console.log(`[歌词调试] getMediaSource 失败 (quality: ${quality}):`, error)
-              continue
             }
+          } catch (error) {
+            console.error('[歌词调试] resolveStream 错误:', error)
+            setError(error instanceof Error ? error.message : '解析失败')
+          } finally {
+            setIsLoading(false)
+            resolvingStreamRef.current = null
           }
-        } catch (error) {
-          console.error('[歌词调试] resolveStream 错误:', error)
-          setError(error instanceof Error ? error.message : '解析失败')
-        } finally {
-          setIsLoading(false)
-          resolvingStreamRef.current = null
         }
       }
       
