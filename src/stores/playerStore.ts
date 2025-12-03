@@ -32,6 +32,7 @@ export interface PlayerState {
   
   // Actions
   setCurrentTrack: (track: PluginTrack | null) => void
+  updateCurrentTrackExtra: (extra: Record<string, unknown>) => void
   setCurrentStream: (stream: PluginStream | null) => void
   setIsPlaying: (playing: boolean) => void
   setIsLoading: (loading: boolean) => void
@@ -121,6 +122,18 @@ export const usePlayerStore = create<PlayerState>()(
         }
         set({ currentTrack: track, currentStream: null, error: null, currentTime: 0, duration: 0, lyrics: [] })
       },
+      updateCurrentTrackExtra: (extra) => set((state) => {
+        if (!state.currentTrack) return state
+        return {
+          currentTrack: {
+            ...state.currentTrack,
+            extra: {
+              ...state.currentTrack.extra,
+              ...extra,
+            },
+          },
+        }
+      }),
       setCurrentStream: (stream) => set({ currentStream: stream }),
       setIsPlaying: (playing) => set({ isPlaying: playing }),
       setIsLoading: (loading) => set({ isLoading: loading }),

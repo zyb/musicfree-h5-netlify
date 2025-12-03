@@ -40,6 +40,7 @@ function App() {
     setCurrentStream,
     setError,
     setLyrics,
+    updateCurrentTrackExtra,
     playNext,
   } = usePlayerStore()
   
@@ -56,6 +57,48 @@ function App() {
       return
     }
     
+    // 尝试直接调用原生插件的 getMediaSource，以获取完整数据（包括歌词）
+    const host = (globalThis as any).MusicFreeH5
+    if (host && currentTrack.extra) {
+      const loadedPlugins = host.getLoadedPlugins?.() || []
+      const activePluginId = usePluginStore.getState().activePluginId
+      const activePlugin = loadedPlugins.find((p: any) => p.meta?.id === activePluginId)
+      
+      if (activePlugin?.instance?.getMediaSource) {
+        setIsLoading(true)
+        try {
+          const qualities = ['128', 'standard', '320', 'high', 'low', 'super']
+          for (const quality of qualities) {
+            try {
+              // getMediaSource 可能返回包含 lrc 的完整数据
+              const result = await activePlugin.instance.getMediaSource(currentTrack.extra as any, quality)
+              if (result?.url) {
+                // 如果返回的数据中包含 lrc，更新 track 的 extra
+                if (result.lrc && typeof result.lrc === 'string') {
+                  updateCurrentTrackExtra({ lrc: result.lrc })
+                  // 立即解析歌词
+                  const lyrics = parseLRC(result.lrc)
+                  if (lyrics.length > 0) {
+                    setLyrics(lyrics)
+                  }
+                }
+                setCurrentStream({ url: result.url })
+                setIsLoading(false)
+                return
+              }
+            } catch {
+              continue
+            }
+          }
+        } catch (error) {
+          setError(error instanceof Error ? error.message : '解析失败')
+        } finally {
+          setIsLoading(false)
+        }
+      }
+    }
+    
+    // 回退到使用插件的 resolveStream 方法
     const plugin = getActivePluginInstance()
     if (!plugin?.resolveStream) {
       setError('无法解析音频地址')
@@ -71,17 +114,17 @@ function App() {
     } finally {
       setIsLoading(false)
     }
-  }, [currentTrack, getActivePluginInstance, setCurrentStream, setError, setIsLoading])
+  }, [currentTrack, getActivePluginInstance, setCurrentStream, setError, setIsLoading, updateCurrentTrackExtra, setLyrics])
   
-  // 获取歌词
-  const fetchLyrics = useCallback(async () => {
+  // 获取歌词（从 track.extra 中读取）
+  const fetchLyrics = useCallback(() => {
     if (!currentTrack) {
       setLyrics([])
       return
     }
 
     try {
-      // 首先检查 track.extra 中是否有 lrc 字段
+      // 直接从 track.extra 中读取 lrc 字段
       const extra = currentTrack.extra as { lrc?: string; [key: string]: unknown } | undefined
       
       if (extra?.lrc) {
@@ -91,33 +134,6 @@ function App() {
           if (lyrics.length > 0) {
             setLyrics(lyrics)
             return
-          }
-        }
-      }
-
-      // 尝试通过原生插件获取歌词
-      const host = (globalThis as any).MusicFreeH5
-      if (host && currentTrack.extra) {
-        const loadedPlugins = host.getLoadedPlugins?.() || []
-        const activePluginId = usePluginStore.getState().activePluginId
-        const activePlugin = loadedPlugins.find((p: any) => p.meta?.id === activePluginId)
-        
-        if (activePlugin?.instance?.getLyric) {
-          try {
-            // 使用 extra 作为参数，因为 getLyric 需要原始的 track 数据
-            const result = await activePlugin.instance.getLyric(currentTrack.extra as any)
-            if (result?.rawLrc) {
-              const lrcText = result.rawLrc
-              if (lrcText && typeof lrcText === 'string' && lrcText.trim()) {
-                const lyrics = parseLRC(lrcText)
-                if (lyrics.length > 0) {
-                  setLyrics(lyrics)
-                  return
-                }
-              }
-            }
-          } catch (error) {
-            // 静默失败，不输出错误日志
           }
         }
       }
@@ -133,23 +149,15 @@ function App() {
   // 当 currentTrack 改变时解析流和获取歌词
   useEffect(() => {
     if (currentTrack) {
-      if (!currentStream) {
-        resolveStream().then(() => {
-          // 解析流之后再次尝试获取歌词（因为有些插件在解析流时才返回歌词）
-          setTimeout(() => fetchLyrics(), 100)
-        })
-      }
+      // 先尝试从现有数据中获取歌词
       fetchLyrics()
+      
+      if (!currentStream) {
+        // 解析流时会自动提取并保存歌词
+        resolveStream()
+      }
     }
   }, [currentTrack, currentStream, resolveStream, fetchLyrics])
-  
-  // 当 currentStream 改变时，再次尝试获取歌词（因为解析流可能更新了数据）
-  useEffect(() => {
-    if (currentStream && currentTrack) {
-      // 延迟一下，确保数据已经更新
-      setTimeout(() => fetchLyrics(), 200)
-    }
-  }, [currentStream, currentTrack, fetchLyrics])
   
   // 当 currentStream 改变时加载音频
   useEffect(() => {
