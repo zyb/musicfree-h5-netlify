@@ -31,7 +31,7 @@ const proxyTargets = {
   },
   
   // ============ 酷我音乐 API (元力KW、小蜗) ============
-  // 注意：使用 HTTPS 以确保 Zeabur 等海外服务器可以访问
+  // 注意：使用 HTTPS 以确保服务器可以正常访问
   kuwo_search: {
     target: 'https://search.kuwo.cn',
     headers: { referer: 'https://www.kuwo.cn/' },
@@ -80,7 +80,7 @@ const proxyTargets = {
   },
   
   // ============ 酷狗音乐 API (元力KG、小枸) ============
-  // 注意：使用 HTTPS 以确保 Zeabur 等海外服务器可以访问
+  // 注意：使用 HTTPS 以确保服务器可以正常访问
   kugou_search: {
     target: 'https://msearch.kugou.com',
     headers: { referer: 'https://www.kugou.com/' },

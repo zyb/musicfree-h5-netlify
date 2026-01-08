@@ -50,6 +50,48 @@ const now = () => Date.now()
 const isHttps = (url: string) => /^https:\/\//i.test(url)
 const isRemoteUrl = (url: string) => /^https?:\/\//i.test(url)
 
+// 检测是否是媒体资源 URL（图片、音频、视频等，这些资源通常没有 CORS 限制）
+const isMediaUrl = (url: string): boolean => {
+  // 检查 URL 路径中的文件扩展名
+  const mediaExtensions = [
+    // 图片
+    /\.(jpg|jpeg|png|gif|webp|svg|bmp|ico)$/i,
+    // 音频
+    /\.(mp3|wav|ogg|m4a|aac|flac|wma|mp4|m4v)$/i,
+    // 视频
+    /\.(mp4|webm|mkv|avi|mov|flv|m3u8)$/i,
+  ]
+  
+  // 检查 URL 中是否包含媒体扩展名
+  for (const pattern of mediaExtensions) {
+    if (pattern.test(url)) {
+      return true
+    }
+  }
+  
+  // 检查是否是常见的媒体资源路径模式
+  const mediaPathPatterns = [
+    /\/image[s]?\//i,
+    /\/audio\//i,
+    /\/video\//i,
+    /\/media\//i,
+    /\/cover[s]?\//i,
+    /\/artwork\//i,
+    /\/photo[s]?\//i,
+    /\/pic[s]?\//i,
+    /\/thumb[s]?\//i,
+    /\/album[s]?\//i,
+  ]
+  
+  for (const pattern of mediaPathPatterns) {
+    if (pattern.test(url)) {
+      return true
+    }
+  }
+  
+  return false
+}
+
 // 检测是否为开发环境
 const isDevelopment = () => {
   // 通过检查 hostname 判断是否为开发环境（localhost 或 127.0.0.1）
@@ -90,85 +132,42 @@ const getLocalProxyUrl = (url: string): string | null => {
   return null
 }
 
-// HTTPS URL 的 CORS 代理（按优先级排序）
-const httpsProxyCandidates: Array<(url: string) => string> = [
-  (url) => url, // 先尝试直接请求
-  // 优先使用 codetabs（相对稳定）
-  (url) => `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`,
-  // allorigins 备用（有时不稳定）
-  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  // 其他备用代理
-  (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-  (url) => `https://cors.isomorphic-git.org/${url}`,
-]
+// 不再使用 CORS 代理，所有请求都通过 serverless 代理处理
 
-// HTTP URL 的 CORS 代理（需要支持非 HTTPS 源）
-const httpProxyCandidates: Array<(url: string) => string> = [
-  // codetabs 支持 HTTP（注意：需要尾部斜杠）
-  (url) => `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`,
-  // allorigins 支持 HTTP
-  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  // 直接请求（某些情况下可能成功）
-  (url) => url,
-]
-
-const defaultBuilders = (url: string) => {
-  if (!isRemoteUrl(url)) return [(current: string) => current]
-  
-  // 在开发环境中，优先使用本地代理
-  const localProxy = getLocalProxyUrl(url)
-  if (localProxy) {
-    const candidates = isHttps(url) ? httpsProxyCandidates : httpProxyCandidates
-    return [(_: string) => localProxy, ...candidates]
+// 使用 serverless 代理获取文本内容
+const fetchTextWithFallback = async (url: string, init?: RequestInit): Promise<string> => {
+  // 媒体资源直接请求（没有 CORS 限制）
+  if (isMediaUrl(url)) {
+    console.log('[fetchTextWithFallback] 媒体资源，直接请求:', url.substring(0, 60))
+    const response = await fetch(url, init)
+    if (!response.ok) {
+      throw new Error(`Request failed: ${response.status}`)
+    }
+    return await response.text()
   }
   
-  return isHttps(url) ? httpsProxyCandidates : httpProxyCandidates
-}
-
-const requestWithFallback = async <T>(
-  url: string,
-  handler: (response: Response, target: string) => Promise<T>,
-  init?: RequestInit,
-  builders?: Array<(url: string) => string>,
-) => {
-  const errors: string[] = []
-  const candidates = builders ?? defaultBuilders(url)
-  for (const builder of candidates) {
-    const target = builder(url)
+  // 尝试使用 serverless 代理
+  const rewrittenUrl = rewriteUrl(url)
+  if (rewrittenUrl) {
     try {
-      const response = await fetch(target, init)
+      const response = await fetch(rewrittenUrl, init)
       if (response.ok) {
-        try {
-          return await handler(response, target)
-        } catch (handlerError) {
-          errors.push(
-            `解析 ${target} 失败：${
-              handlerError instanceof Error
-                ? handlerError.message
-                : String(handlerError)
-            }`,
-          )
-          continue
-        }
+        return await response.text()
       }
-      errors.push(`请求 ${target} 失败：${response.status}`)
+      throw new Error(`Serverless proxy returned error: ${response.status}`)
     } catch (error) {
-      errors.push(
-        `请求 ${target} 异常：${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      )
+      console.error('[fetchTextWithFallback] Serverless 代理失败:', error)
+      throw error
     }
   }
-  throw new Error(errors.join('\n'))
-}
-
-const fetchTextWithFallback = (url: string, init?: RequestInit) => {
-  return requestWithFallback<string>(
-    url,
-    async (response) => await response.text(),
-    init,
-  )
+  
+  // 如果无法重写 URL，直接请求（可能会 CORS 错误）
+  console.warn('[fetchTextWithFallback] URL 无法通过代理，直接请求（可能 CORS 错误):', url.substring(0, 60))
+  const response = await fetch(url, init)
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`)
+  }
+  return await response.text()
 }
 
 const safeParse = <T>(value: string | null): T | null => {
@@ -401,9 +400,7 @@ type PluginHostContext = {
   descriptor: InstalledPlugin
 }
 
-// URL 重写规则 - 将外部 URL 映射到本地代理
-// 只保留支持的音乐源所需的代理：
-// - 小秋/小蜗/小芸/小枸音乐 (使用 JSDelivr/GitHub，走 CORS 代理或直连)
+// URL 重写规则 - 将外部 URL 映射到 serverless 代理
 // 支持的音乐源代理配置：
 // - 小秋音乐 (QQ 音乐 API)
 // - 小蜗音乐 (酷我音乐 API)
@@ -477,7 +474,13 @@ const urlRewriteRules: Array<{ pattern: RegExp; replace: string }> = [
 ]
 
 // 重写 URL 使用代理（开发环境使用本地代理，生产环境使用 API 代理）
+// 注意：媒体资源（图片、音频、视频）不通过代理，直接请求
 const rewriteUrl = (url: string): string | null => {
+  // 如果是媒体资源，不重写，直接返回 null
+  if (isMediaUrl(url)) {
+    return null
+  }
+  
   for (const rule of urlRewriteRules) {
     if (rule.pattern.test(url)) {
       return url.replace(rule.pattern, rule.replace)
@@ -594,7 +597,7 @@ export const isMSERequiredAudio = (url: string): boolean => {
   return false
 }
 
-// 创建带代理的 fetch 函数
+// 创建带代理的 fetch 函数（仅使用 serverless 代理）
 const createProxiedFetch = (): typeof fetch => {
   return async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
@@ -603,124 +606,45 @@ const createProxiedFetch = (): typeof fetch => {
       return fetch(input, init)
     }
     
-    // 首先尝试使用代理（开发环境使用本地代理，生产环境使用 API 代理）
+    // 媒体资源（图片、音频、视频）没有 CORS 限制，直接请求
+    if (isMediaUrl(url)) {
+      console.log('[Proxy] 媒体资源，直接请求:', url.substring(0, 60))
+      return fetch(input, init)
+    }
+    
+    // 使用 serverless 代理（开发环境使用本地代理，生产环境使用 Netlify Function）
     const rewrittenUrl = rewriteUrl(url)
     if (rewrittenUrl) {
       try {
         if (isDevelopment()) {
           console.log('[Proxy] 本地代理:', url.substring(0, 60), '->', rewrittenUrl.substring(0, 40))
         } else {
-          console.log('[Proxy] API 代理:', url.substring(0, 60), '->', rewrittenUrl.substring(0, 40))
+          console.log('[Proxy] Serverless 代理:', url.substring(0, 60), '->', rewrittenUrl.substring(0, 40))
         }
         const response = await fetch(rewrittenUrl, init)
         if (response.ok) {
           // 检查响应 Content-Type，如果是 HTML 说明 serverless function 没有工作
           const contentType = response.headers.get('content-type') || ''
           if (contentType.includes('text/html')) {
-            console.warn('[Proxy] API 代理返回 HTML (Content-Type: text/html)，说明 serverless function 未工作，回退到 CORS 代理')
-            // 不返回 response，继续执行下面的 CORS 代理代码
-            // 注意：这里不能读取 response.text()，因为 Response 只能读取一次
-          } else {
-            // 返回有效的响应
-            return response
+            const errorText = await response.text()
+            console.error('[Proxy] Serverless 代理返回 HTML 错误页面:', errorText.substring(0, 500))
+            throw new Error(`Serverless proxy returned HTML error page. Status: ${response.status}`)
           }
+          // 返回有效的响应
+          return response
         } else {
-          console.warn('[Proxy] 代理返回:', response.status)
+          const errorText = await response.text()
+          console.error('[Proxy] Serverless 代理返回错误:', response.status, errorText.substring(0, 500))
+          throw new Error(`Serverless proxy returned error. Status: ${response.status}`)
         }
       } catch (e) {
-        console.warn('[Proxy] 代理异常:', e)
-        // 如果代理失败，继续尝试 CORS 代理
+        console.error('[Proxy] Serverless 代理异常:', e)
+        throw e
       }
     }
     
-    // 尝试 CORS 代理
-    const method = init?.method?.toUpperCase() || 'GET'
-    
-    // 对于 GET 请求，优先尝试代理
-    if (method === 'GET') {
-      // 优先尝试 codetabs（相对稳定）
-      try {
-        const codetabsUrl = `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`
-        console.log('[Proxy] codetabs:', url.substring(0, 50))
-        const response = await fetch(codetabsUrl, {
-          signal: init?.signal,
-        })
-        if (response.ok) {
-          console.log('[Proxy] codetabs 成功')
-          return response
-        }
-        console.warn('[Proxy] codetabs 返回:', response.status)
-      } catch (e) {
-        console.warn('[Proxy] codetabs 异常:', e)
-      }
-      
-      // 尝试 allorigins 代理（备用）
-      try {
-        const alloriginsUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
-        console.log('[Proxy] allorigins:', url.substring(0, 50))
-        const response = await fetch(alloriginsUrl, {
-          signal: init?.signal,
-        })
-        if (response.ok) {
-          console.log('[Proxy] allorigins 成功')
-          return response
-        }
-        console.warn('[Proxy] allorigins 返回:', response.status)
-      } catch (e) {
-        console.warn('[Proxy] allorigins 异常:', e)
-      }
-      
-      // 尝试其他 CORS 代理
-      const candidates = isHttps(url) ? httpsProxyCandidates : httpProxyCandidates
-      for (const builder of candidates) {
-        const proxiedUrl = builder(url)
-        if (proxiedUrl === url) continue // 跳过直接请求（最后尝试）
-        try {
-          console.log('[Proxy] 尝试代理:', proxiedUrl.substring(0, 60))
-          const response = await fetch(proxiedUrl, {
-            signal: init?.signal,
-          })
-          if (response.ok) {
-            console.log('[Proxy] 代理成功')
-            return response
-          }
-        } catch (e) {
-          console.warn('[Proxy] 代理异常:', e)
-          continue
-        }
-      }
-    } else {
-      // 对于 POST/PUT/DELETE 等非 GET 请求
-      // 大部分公共 CORS 代理不支持 POST，但我们可以尝试一些方法
-      console.log('[Proxy] 非 GET 请求 (', method, ')，尝试代理')
-      
-      // 尝试 codetabs（可能支持 POST）
-      try {
-        const codetabsUrl = `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`
-        console.log('[Proxy] codetabs POST:', url.substring(0, 50))
-        const response = await fetch(codetabsUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'X-Target-URL': url,
-            ...(init?.headers as Record<string, string> || {}),
-          },
-          body: init?.body,
-          signal: init?.signal,
-        })
-        if (response.ok) {
-          console.log('[Proxy] codetabs POST 成功')
-          return response
-        }
-      } catch (e) {
-        console.warn('[Proxy] codetabs POST 异常:', e)
-      }
-      
-      console.warn('[Proxy] POST 请求无法通过 CORS 代理，将直接请求（可能 CORS 错误）')
-    }
-    
-    // 最后尝试直接请求（可能会 CORS 错误）
-    console.log('[Proxy] 直接请求:', url.substring(0, 60))
+    // 如果无法重写 URL（不在代理列表中），直接请求（可能会 CORS 错误）
+    console.warn('[Proxy] URL 无法通过代理，直接请求（可能 CORS 错误):', url.substring(0, 60))
     return fetch(input, init)
   }
 }
@@ -780,7 +704,8 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
     
     if (needsRawJsonp) {
       // 对于需要原始 JSONP 的 API，保留原始文本
-      console.log('[axios] 保留原始 JSONP 文本用于插件处理:', requestUrl?.substring(0, 80))
+      // Serverless 代理直接返回原始内容，无需处理包装格式
+      console.log('[axios] 保留原始 JSONP 文本用于插件处理:', requestUrl?.substring(0, 80), '长度:', text.length)
       data = text
     } else {
       // 先尝试解析 JSONP 响应
@@ -799,9 +724,9 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
           if (typeof data === 'object' && data !== null && 'code' in data && 'subcode' in data && 'msg' in data) {
             const errorData = data as { code: number; subcode: number; msg: string }
             if (errorData.code === 0 && errorData.subcode === 1 && errorData.msg.includes('invalid referer')) {
-              console.error('[axios] 检测到 invalid referer 错误，CORS 代理无法传递 Referer header:', requestUrl?.substring(0, 80))
+              console.error('[axios] 检测到 invalid referer 错误，Serverless 代理应该能够传递 Referer header:', requestUrl?.substring(0, 80))
               // 创建一个特殊错误，标记需要 Referer
-              const error = new Error(`Invalid referer error: CORS proxy cannot forward Referer header. URL: ${requestUrl}`) as Error & { needsReferer?: boolean; originalUrl?: string }
+              const error = new Error(`Invalid referer error: Serverless proxy should forward Referer header. URL: ${requestUrl}`) as Error & { needsReferer?: boolean; originalUrl?: string }
               error.needsReferer = true
               error.originalUrl = requestUrl
               throw error
@@ -838,7 +763,7 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
             const errorData = data as { code: number; subcode: number; msg: string }
             if (errorData.code === 0 && errorData.subcode === 1 && errorData.msg.includes('invalid referer')) {
               console.error('[axios] 检测到 invalid referer 错误（JSON格式）:', requestUrl?.substring(0, 80))
-              const error = new Error(`Invalid referer error: CORS proxy cannot forward Referer header. URL: ${requestUrl}`) as Error & { needsReferer?: boolean; originalUrl?: string }
+              const error = new Error(`Invalid referer error: Serverless proxy should forward Referer header. URL: ${requestUrl}`) as Error & { needsReferer?: boolean; originalUrl?: string }
               error.needsReferer = true
               error.originalUrl = requestUrl
               throw error
@@ -1060,25 +985,16 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
     console.log('[axios] 请求:', init.method, finalUrl)
     
     try {
-      // 使用 proxiedFetch 而不是直接使用 fetch，确保通过 CORS 代理
+      // 使用 proxiedFetch 而不是直接使用 fetch，确保通过 serverless 代理
       const response = await _proxiedFetch(finalUrl, init)
       
       // 如果请求的是 API 代理且返回 HTML，说明 serverless function 没有工作
-      // 需要回退到原始 URL 并使用 CORS 代理
       if (finalUrl.startsWith('/api/proxy/')) {
         const contentType = response.headers.get('content-type') || ''
         if (contentType.includes('text/html')) {
-          console.warn('[axios] API 代理返回 HTML，回退到原始 URL 并使用 CORS 代理')
-          // 提取原始 URL
-          const originalUrl = extractOriginalUrl(finalUrl)
-          if (originalUrl) {
-            // 重新请求原始 URL，这次会使用 CORS 代理（因为 rewriteUrl 会返回 null，不会再次重写）
-            console.log('[axios] 回退到原始 URL:', originalUrl)
-            const retryResponse = await _proxiedFetch(originalUrl, init)
-            const result = await processResponse(retryResponse, originalUrl)
-            console.log('[axios] CORS 代理响应:', retryResponse.status)
-            return result
-          }
+          const errorText = await response.text()
+          console.error('[axios] Serverless 代理返回 HTML 错误页面:', errorText.substring(0, 500))
+          throw new Error(`Serverless proxy returned HTML error page. Status: ${response.status}`)
         }
       }
       
@@ -1103,49 +1019,18 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
       console.log('[axios] 响应:', response.status)
       return result
     } catch (error) {
-      // 如果错误是 invalid referer 错误，说明 CORS 代理无法传递 Referer header
-      // 这是公共 CORS 代理的限制，无法解决
+      // 如果错误是 invalid referer 错误，说明 serverless 代理无法传递 Referer header
+      // 这通常不应该发生，因为 serverless 代理应该能够传递所有请求头
       if (error instanceof Error && (error.message.includes('Invalid referer') || (error as Error & { needsReferer?: boolean }).needsReferer)) {
-        console.error('[axios] Invalid referer 错误：公共 CORS 代理无法传递 Referer header，这是已知限制')
-        // 尝试使用其他 CORS 代理（虽然它们也可能无法传递 Referer）
-        if (finalUrl.startsWith('/api/proxy/')) {
-          const originalUrl = extractOriginalUrl(finalUrl)
-          if (originalUrl && originalUrl.includes('y.qq.com')) {
-            console.warn('[axios] 尝试使用 allorigins 代理（虽然可能也无法传递 Referer）')
-            try {
-              const alloriginsUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(originalUrl)}`
-              const retryResponse = await fetch(alloriginsUrl, { signal: init?.signal })
-              if (retryResponse.ok) {
-                const retryResult = await processResponse(retryResponse, originalUrl)
-                console.log('[axios] allorigins 代理响应:', retryResponse.status)
-                return retryResult
-              }
-            } catch (retryError) {
-              console.error('[axios] allorigins 代理也失败:', retryError)
-            }
-          }
-        }
-        // 如果所有尝试都失败，抛出错误
-        debugLog('error', `[axios] Invalid referer 错误，无法解决: ${error.message}`)
+        console.error('[axios] Invalid referer 错误：Serverless 代理应该能够传递 Referer header，请检查配置')
+        debugLog('error', `[axios] Invalid referer 错误: ${error.message}`)
         throw error
       }
       
-      // 如果错误是 HTML 错误且是 API 代理请求，尝试回退到原始 URL
+      // 如果错误是 HTML 错误且是 API 代理请求，说明 serverless function 没有正常工作
       if (error instanceof Error && error.message.includes('HTML') && finalUrl.startsWith('/api/proxy/')) {
-        console.warn('[axios] API 代理返回 HTML 错误，尝试回退到原始 URL')
-        try {
-          // 提取原始 URL
-          const originalUrl = extractOriginalUrl(finalUrl)
-          if (originalUrl) {
-            console.log('[axios] 回退到原始 URL:', originalUrl)
-            const retryResponse = await _proxiedFetch(originalUrl, init)
-            const result = await processResponse(retryResponse, originalUrl)
-            console.log('[axios] CORS 代理响应:', retryResponse.status)
-            return result
-          }
-        } catch (retryError) {
-          console.error('[axios] 回退到 CORS 代理也失败:', retryError)
-        }
+        console.error('[axios] Serverless 代理返回 HTML 错误，请检查 Netlify Function 配置')
+        throw error
       }
       debugLog('error', `[axios] 请求失败: ${error instanceof Error ? error.message : String(error)}`)
       throw error
@@ -1970,10 +1855,26 @@ const adaptMusicFreePlugin = (
         return []
       }
       try {
+        console.log('[MusicFree Plugin] getPlaylistSongs 调用，playlist:', {
+          id: playlist.id,
+          title: playlist.title,
+          extra: playlist.extra,
+        })
         const result = await native.getMusicSheetInfo(playlist.extra as MusicFreePlaylist, 1)
+        console.log('[MusicFree Plugin] getMusicSheetInfo 返回:', {
+          hasResult: !!result,
+          musicListLength: result?.musicList?.length || 0,
+          isEnd: result?.isEnd,
+        })
         return (result?.musicList || []).map(mapTrack)
       } catch (error) {
         console.error('[MusicFree Plugin] getPlaylistSongs error:', error)
+        if (error instanceof Error) {
+          console.error('[MusicFree Plugin] 错误详情:', {
+            message: error.message,
+            stack: error.stack?.substring(0, 500),
+          })
+        }
         return []
       }
     },
