@@ -17,6 +17,12 @@
 html {
   font-size: 16px;
   -webkit-tap-highlight-color: transparent;
+  /* 防止移动端字体缩放 */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* 优化移动端滚动 */
+  -webkit-overflow-scrolling: touch;
+  overflow-scrolling: touch;
 }
 
 body {
@@ -26,6 +32,73 @@ body {
   min-height: 100vh;
   min-height: 100dvh;
   overflow-x: hidden;
+  /* 防止移动端选择文本 */
+  -webkit-user-select: none;
+  user-select: none;
+  /* 优化移动端触摸 */
+  touch-action: pan-y;
+  /* 防止移动端双击缩放 */
+  touch-action: manipulation;
+}
+
+/* 允许输入框选择文本 */
+input, textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* 移动端优化 */
+@media (max-width: 768px) {
+  html {
+    font-size: 14px;
+  }
+  
+  body {
+    /* 防止移动端地址栏影响布局 */
+    min-height: -webkit-fill-available;
+  }
+  
+  /* 优化移动端按钮点击 */
+  button {
+    -webkit-tap-highlight-color: rgba(237, 116, 30, 0.2);
+  }
+}
+
+/* 小屏幕优化 */
+@media (max-width: 480px) {
+  html {
+    font-size: 14px;
+  }
+}
+
+/* 超小屏幕优化 */
+@media (max-width: 360px) {
+  html {
+    font-size: 13px;
+  }
+}
+
+/* 确保根容器在移动端正确显示 */
+#root {
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+  min-height: -webkit-fill-available;
+  position: relative;
+  overflow-x: hidden;
+}
+
+/* 移动端安全区域适配 */
+@supports (padding: max(0px)) {
+  body {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+  
+  #root {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
 }
 
 /* 自定义滚动条 */
@@ -189,5 +262,15 @@ input[type="range"]::-moz-range-thumb {
     linear-gradient(rgba(148, 163, 184, 0.03) 1px, transparent 1px),
     linear-gradient(90deg, rgba(148, 163, 184, 0.03) 1px, transparent 1px);
   background-size: 50px 50px;
+}
+
+/* 隐藏滚动条但保持滚动功能 */
+.no-scrollbar {
+  -ms-overflow-style: none;  /* IE and Edge */
+  scrollbar-width: none;  /* Firefox */
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;  /* Chrome, Safari and Opera */
 }
 

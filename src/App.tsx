@@ -1,16 +1,17 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Music2, Rss, ListMusic, Search } from 'lucide-react'
+import { Music2, Rss, ListMusic, Search, Radio, ChevronDown, RefreshCw } from 'lucide-react'
 import { usePluginStore } from './stores/pluginStore'
 import { usePlayerStore } from './stores/playerStore'
-import { proxyMediaUrl } from './lib/pluginHost'
+import { parseLRC, getCurrentLyric } from './lib/lyrics'
+import { loadSongCache, saveSongCache, deleteSongCache } from './lib/songCache'
+import { needsMSEPlayback, loadMSEAudio, cleanupMSE, isMSESupported } from './lib/msePlayer'
+import type { PluginTrack } from './types/plugin'
 import { Player } from './components/Player'
 import { SearchView } from './components/SearchView'
 import { PlaylistView } from './components/PlaylistView'
 import { PluginManager } from './components/PluginManager'
 import { MiniPlayer } from './components/MiniPlayer'
-import { parseLRC } from './utils/lyricParser'
-import { getLyricFromCache } from './lib/pluginHost'
 
 type TabId = 'search' | 'playlist' | 'plugins'
 
@@ -23,11 +24,35 @@ const tabs = [
 function App() {
   const [activeTab, setActiveTab] = useState<TabId>('search')
   const [showPlayer, setShowPlayer] = useState(false)
+  const [showPluginSelect, setShowPluginSelect] = useState(false)
   const audioRef = useRef<HTMLAudioElement>(null)
-  const resolvingStreamRef = useRef<string | null>(null) // 跟踪正在解析的 track id
+  const hasRestoredProgressRef = useRef(false)
+  const currentAudioUrlRef = useRef<string>('')
+  const currentTrackIdRef = useRef<string | undefined>(undefined)
+  const isStreamFromCacheRef = useRef<boolean>(false)
+  const isRetryingRef = useRef<boolean>(false)
+  const wasPlayingBeforeRetryRef = useRef<boolean>(false)
+  const currentBlobUrlRef = useRef<string | null>(null) // 跟踪当前的 blob URL，用于释放
+  const retryCountRef = useRef<number>(0) // 重试次数计数器
+  const lastFailedTrackIdRef = useRef<string | undefined>(undefined) // 上次失败的 trackId，用于跟踪重试次数
+  const maxRetryCount = 3 // 最大重试次数
+  const pendingCacheTrackRef = useRef<{ track: PluginTrack; stream: any; lyrics?: string } | null>(null) // 待缓存的歌曲信息
   
   const init = usePluginStore((s) => s.init)
   const getActivePluginInstance = usePluginStore((s) => s.getActivePluginInstance)
+  const {
+    plugins,
+    activePluginId,
+    setActivePlugin,
+  } = usePluginStore()
+  
+  const handleRefresh = () => {
+    // 刷新整个页面，类似 Ctrl+R
+    window.location.reload()
+  }
+  
+  const readyPlugins = plugins.filter((p) => p.status === 'ready')
+  const activePlugin = plugins.find((p) => p.meta.id === activePluginId)
   
   const {
     currentTrack,
@@ -35,6 +60,8 @@ function App() {
     isPlaying,
     volume,
     muted,
+    currentTime,
+    lyrics,
     setIsPlaying,
     setIsLoading,
     setDuration,
@@ -42,407 +69,798 @@ function App() {
     setCurrentStream,
     setError,
     setLyrics,
-    updateCurrentTrackExtra,
     playNext,
+    playPrevious,
   } = usePlayerStore()
   
   useEffect(() => {
     init()
+    
+    // 组件卸载时清理 blob URL
+    return () => {
+      if (currentBlobUrlRef.current) {
+        URL.revokeObjectURL(currentBlobUrlRef.current)
+        currentBlobUrlRef.current = null
+      }
+    }
   }, [init])
   
-  // 解析音频流
-  const resolveStream = useCallback(async () => {
-    // 使用最新的 currentTrack（从 store 中获取）
-    const track = usePlayerStore.getState().currentTrack
-    if (!track) {
-      console.log('[歌词调试] resolveStream: currentTrack 为空')
+  // Media Session API - 设置动作处理程序（只在组件挂载和歌曲变化时设置，避免频繁刷新）
+  useEffect(() => {
+    // 检查 Media Session API 支持情况
+    if (!('mediaSession' in navigator)) {
+      console.warn('[MediaSession] Media Session API 不支持')
+      console.warn('[MediaSession] 提示：锁屏界面显示需要：')
+      console.warn('[MediaSession] 1. 使用 HTTPS 连接（已满足）')
+      console.warn('[MediaSession] 2. 浏览器支持 Media Session API')
+      console.warn('[MediaSession] 3. iOS Safari 需要添加到主屏幕（PWA）')
+      console.warn('[MediaSession] 4. Android Chrome 通常直接支持')
       return
     }
     
-    // 防止重复调用：如果正在解析同一个 track，直接返回
-    if (resolvingStreamRef.current === track.id) {
-      console.log('[歌词调试] resolveStream: 正在解析中，跳过重复调用')
-      return
-    }
-    
-    // 标记开始解析
-    resolvingStreamRef.current = track.id
-    
-    console.log('[歌词调试] resolveStream 开始，currentTrack:', {
-      id: track.id,
-      title: track.title,
-      extra: track.extra,
+    const mediaSession = navigator.mediaSession
+    console.log('[MediaSession] ✓ Media Session API 可用')
+    console.log('[MediaSession] 浏览器信息:', {
+      userAgent: navigator.userAgent,
+      platform: navigator.platform,
+      isSecureContext: window.isSecureContext,
     })
     
+    // 设置动作处理程序
+    mediaSession.setActionHandler('play', () => {
+      console.log('[MediaSession] 收到播放动作')
+      setIsPlaying(true)
+    })
+    
+    mediaSession.setActionHandler('pause', () => {
+      console.log('[MediaSession] 收到暂停动作')
+      setIsPlaying(false)
+    })
+    
+    mediaSession.setActionHandler('previoustrack', () => {
+      console.log('[MediaSession] 收到上一首动作')
+      const prev = playPrevious()
+      if (prev) {
+        setIsPlaying(true)
+      }
+    })
+    
+    mediaSession.setActionHandler('nexttrack', () => {
+      console.log('[MediaSession] 收到下一首动作')
+      const next = playNext()
+      if (next) {
+        setIsPlaying(true)
+      }
+    })
+    
+    // 禁用定位动作（不显示播放进度条）
+    // 注意：某些浏览器可能仍然显示进度条，但禁用 seekto 可以防止用户通过通知栏调整进度
     try {
-      if (track.streamUrl) {
-        console.log('[歌词调试] 使用 streamUrl:', track.streamUrl)
-        setCurrentStream({ url: track.streamUrl })
-        resolvingStreamRef.current = null
+      mediaSession.setActionHandler('seekto', null)
+    } catch (error) {
+      // 某些浏览器可能不支持禁用 seekto
+      console.log('[MediaSession] 无法禁用定位动作:', error)
+    }
+    
+    // 明确禁用快进和快退按钮（音乐播放器通常不需要这些功能）
+    // 注意：某些浏览器可能仍然显示这些按钮，但设置为 null 可以防止它们被触发
+    try {
+      mediaSession.setActionHandler('seekbackward', null)
+      mediaSession.setActionHandler('seekforward', null)
+    } catch (error) {
+      // 某些浏览器可能不支持禁用这些动作
+      console.log('[MediaSession] 无法禁用快进快退按钮:', error)
+    }
+    
+    // 清理函数
+    return () => {
+      // 组件卸载时清除动作处理程序
+      try {
+        mediaSession.setActionHandler('play', null)
+        mediaSession.setActionHandler('pause', null)
+        mediaSession.setActionHandler('previoustrack', null)
+        mediaSession.setActionHandler('nexttrack', null)
+        mediaSession.setActionHandler('seekto', null)
+        mediaSession.setActionHandler('seekbackward', null)
+        mediaSession.setActionHandler('seekforward', null)
+      } catch (error) {
+        console.error('[MediaSession] 清理动作处理程序失败:', error)
+      }
+    }
+  }, [setIsPlaying, playNext, playPrevious, setCurrentTime, isPlaying])
+  
+  // Media Session API - 更新媒体元数据（只在歌曲变化时更新）
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) {
+      return
+    }
+    
+    const mediaSession = navigator.mediaSession
+    
+    // 更新媒体元数据
+    if (currentTrack) {
+      const metadata: MediaMetadataInit = {
+        title: currentTrack.title || '未知标题',
+        artist: currentTrack.artists?.join(' / ') || '未知艺术家',
+        album: currentTrack.album || '',
+        artwork: currentTrack.coverUrl ? [
+          { src: currentTrack.coverUrl, sizes: '96x96', type: 'image/jpeg' },
+          { src: currentTrack.coverUrl, sizes: '128x128', type: 'image/jpeg' },
+          { src: currentTrack.coverUrl, sizes: '192x192', type: 'image/jpeg' },
+          { src: currentTrack.coverUrl, sizes: '256x256', type: 'image/jpeg' },
+          { src: currentTrack.coverUrl, sizes: '384x384', type: 'image/jpeg' },
+          { src: currentTrack.coverUrl, sizes: '512x512', type: 'image/jpeg' },
+        ] : [],
+      }
+      
+      try {
+        mediaSession.metadata = new MediaMetadata(metadata)
+        console.log('[MediaSession] ✓ 已设置媒体元数据:', {
+          title: currentTrack.title,
+          artist: currentTrack.artists?.join(' / '),
+          album: currentTrack.album,
+          hasArtwork: !!currentTrack.coverUrl,
+        })
+      } catch (error) {
+        console.error('[MediaSession] ✗ 设置媒体元数据失败:', error)
+      }
+    } else {
+      // 没有当前歌曲时，清除元数据
+      mediaSession.metadata = null
+      console.log('[MediaSession] 已清除媒体元数据')
+    }
+  }, [currentTrack])
+  
+  // Media Session API - 实时更新歌词到 title（用于蓝牙车载显示）
+  // 使用节流，每 1 秒更新一次，避免频繁更新导致按钮闪烁
+  const lastLyricUpdateRef = useRef<number>(0)
+  const lastLyricTextRef = useRef<string>('')
+  
+  useEffect(() => {
+    if (!('mediaSession' in navigator) || !currentTrack || !isPlaying) {
+      return
+    }
+    
+    const mediaSession = navigator.mediaSession
+    
+    // 节流：每 1 秒更新一次歌词
+    const LYRIC_UPDATE_INTERVAL = 1000
+    const now = Date.now()
+    
+    if (now - lastLyricUpdateRef.current >= LYRIC_UPDATE_INTERVAL) {
+      // 获取当前歌词行
+      const currentLyricText = getCurrentLyric(lyrics, currentTime)
+      
+      // 只有当歌词变化时才更新，避免不必要的更新
+      if (currentLyricText && currentLyricText !== lastLyricTextRef.current) {
+        try {
+          // 更新 metadata，将当前歌词行添加到 title 中
+          // 格式：歌曲名 - 当前歌词
+          const titleWithLyric = currentLyricText.trim()
+            ? `${currentTrack.title} - ${currentLyricText}`
+            : currentTrack.title || '未知标题'
+          
+          const metadata: MediaMetadataInit = {
+            title: titleWithLyric,
+            artist: currentTrack.artists?.join(' / ') || '未知艺术家',
+            album: currentTrack.album || '',
+            artwork: currentTrack.coverUrl ? [
+              { src: currentTrack.coverUrl, sizes: '96x96', type: 'image/jpeg' },
+              { src: currentTrack.coverUrl, sizes: '128x128', type: 'image/jpeg' },
+              { src: currentTrack.coverUrl, sizes: '192x192', type: 'image/jpeg' },
+              { src: currentTrack.coverUrl, sizes: '256x256', type: 'image/jpeg' },
+              { src: currentTrack.coverUrl, sizes: '384x384', type: 'image/jpeg' },
+              { src: currentTrack.coverUrl, sizes: '512x512', type: 'image/jpeg' },
+            ] : [],
+          }
+          
+          mediaSession.metadata = new MediaMetadata(metadata)
+          lastLyricTextRef.current = currentLyricText
+          lastLyricUpdateRef.current = now
+        } catch (error) {
+          // 某些浏览器可能不支持频繁更新 metadata，忽略错误
+        }
+      } else if (!currentLyricText) {
+        // 如果没有歌词，恢复原始标题
+        if (lastLyricTextRef.current) {
+          try {
+            const metadata: MediaMetadataInit = {
+              title: currentTrack.title || '未知标题',
+              artist: currentTrack.artists?.join(' / ') || '未知艺术家',
+              album: currentTrack.album || '',
+              artwork: currentTrack.coverUrl ? [
+                { src: currentTrack.coverUrl, sizes: '96x96', type: 'image/jpeg' },
+                { src: currentTrack.coverUrl, sizes: '128x128', type: 'image/jpeg' },
+                { src: currentTrack.coverUrl, sizes: '192x192', type: 'image/jpeg' },
+                { src: currentTrack.coverUrl, sizes: '256x256', type: 'image/jpeg' },
+                { src: currentTrack.coverUrl, sizes: '384x384', type: 'image/jpeg' },
+                { src: currentTrack.coverUrl, sizes: '512x512', type: 'image/jpeg' },
+              ] : [],
+            }
+            mediaSession.metadata = new MediaMetadata(metadata)
+            lastLyricTextRef.current = ''
+            lastLyricUpdateRef.current = now
+          } catch (error) {
+            // 忽略错误
+          }
+        }
+      }
+    }
+  }, [currentTrack, lyrics, currentTime, isPlaying])
+  
+  // Media Session API - 更新播放状态（只在播放状态变化时更新）
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) {
+      return
+    }
+    
+    const mediaSession = navigator.mediaSession
+    
+    try {
+      mediaSession.playbackState = isPlaying ? 'playing' : 'paused'
+      console.log('[MediaSession] ✓ 播放状态已更新:', mediaSession.playbackState)
+    } catch (error) {
+      console.error('[MediaSession] ✗ 设置播放状态失败:', error)
+    }
+  }, [isPlaying])
+  
+  
+  // 点击外部关闭插件选择下拉菜单
+  useEffect(() => {
+    if (!showPluginSelect) return
+    
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement
+      if (!target.closest('[data-plugin-select]')) {
+        setShowPluginSelect(false)
+      }
+    }
+    
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [showPluginSelect])
+  
+  // 从音频元素获取完整音频数据并缓存（包含完整的歌曲信息）
+  // 方案：Service Worker 缓存音频本体（opaque 响应），页面只保存元数据（URL、歌词等）
+  // 播放时，Service Worker 自动从缓存返回，无需读取内容
+  const cacheAudioFromElement = async (track: PluginTrack, audioElement: HTMLAudioElement, stream: any, lyrics?: string): Promise<void> => {
+    try {
+      // 如果音频元素使用的是 blob URL，说明已经是从缓存加载的，不需要再次缓存
+      if (audioElement.src.startsWith('blob:')) {
+        console.log('[SongCache] 音频元素使用的是 blob URL，已从缓存加载，跳过缓存，trackId:', track.id)
         return
       }
       
-      // 尝试直接调用原生插件的 getMediaSource，以获取完整数据（包括歌词）
-      const host = (globalThis as any).MusicFreeH5
-      console.log('[歌词调试] host 存在:', !!host)
+      // 获取原始音频 URL（从 stream 获取）
+      const originalUrl = stream.url
+      if (!originalUrl) {
+        console.warn('[SongCache] 无法获取原始音频 URL，跳过缓存，trackId:', track.id)
+        return
+      }
       
-      if (host && track.extra) {
-        const loadedPlugins = host.getLoadedPlugins?.() || []
-        const activePluginId = usePluginStore.getState().activePluginId
-        console.log('[歌词调试] activePluginId:', activePluginId, 'loadedPlugins 数量:', loadedPlugins.length)
+      // 等待音频元素完全加载（确保 Service Worker 已经缓存了音频）
+      console.log('[SongCache] 等待音频元素完全加载，trackId:', track.id, 'title:', track.title, '当前 readyState:', audioElement.readyState)
+      
+      // 等待音频完全加载或播放一段时间
+      await new Promise<void>((resolve) => {
+        let resolved = false
+        const startTime = Date.now()
+        const minWaitTime = 2000 // 至少等待 2 秒，确保 Service Worker 已经缓存了音频
         
-        const activePlugin = loadedPlugins.find((p: any) => p.meta?.id === activePluginId)
-        console.log('[歌词调试] activePlugin 找到:', !!activePlugin, '有 getMediaSource:', !!activePlugin?.instance?.getMediaSource)
+        const checkAndResolve = () => {
+          if (resolved) return
+          
+          const elapsed = Date.now() - startTime
+          const isFullyLoaded = audioElement.readyState >= HTMLMediaElement.HAVE_ENOUGH_DATA
+          const hasPlayedEnough = elapsed >= minWaitTime
+          
+          // 如果音频完全加载且已等待足够时间，可以开始保存元数据
+          if (isFullyLoaded && hasPlayedEnough) {
+            resolved = true
+            resolve()
+            return
+          }
+          
+          // 如果音频已经结束，立即解析
+          if (audioElement.ended) {
+            resolved = true
+            resolve()
+            return
+          }
+          
+          // 继续检查
+          setTimeout(checkAndResolve, 200)
+        }
         
-        if (activePlugin?.instance?.getMediaSource) {
-          setIsLoading(true)
-          try {
+        // 如果已经满足条件，立即解析
+        if (audioElement.readyState >= HTMLMediaElement.HAVE_ENOUGH_DATA && Date.now() - startTime >= minWaitTime) {
+          resolve()
+          return
+        }
+        
+        // 开始检查
+        checkAndResolve()
+      })
+      
+      console.log('[SongCache] 保存歌曲元数据到 IndexedDB，trackId:', track.id, 'title:', track.title, 'url:', originalUrl.substring(0, 50))
+      
+      // 只保存元数据（URL、歌词、歌曲信息等）
+      // 音频本体由 Service Worker 在 Cache Storage 中缓存，不需要读取内容
+      await saveSongCache(track, null, stream, lyrics)
+      
+      console.log('[SongCache] ✓ 歌曲元数据缓存完成，trackId:', track.id, 'title:', track.title)
+      console.log('[SongCache] 提示：音频本体已由 Service Worker 缓存，播放时会自动从缓存返回')
+      
+      // 触发缓存完成事件，通知列表组件更新缓存图标
+      window.dispatchEvent(new CustomEvent('songCached', { detail: { trackId: track.id } }))
+    } catch (error) {
+      console.error('[SongCache] ✗ 缓存歌曲失败，trackId:', track.id, 'title:', track.title, 'error:', error)
+      // 不抛出错误，避免影响播放
+    }
+  }
+  
+  // 解析音频流（优先从缓存加载，无缓存时才网络请求）
+  const resolveStream = useCallback(async (skipCache = false) => {
+    if (!currentTrack) return
+    
+    // 如果 skipCache 为 true，清除当前歌曲的缓存
+    if (skipCache) {
+      await deleteSongCache(currentTrack.id)
+      console.log('[SongCache] 重试模式：已清除缓存，将从网络重新请求')
+    }
+    
+    // 优先从缓存加载完整歌曲信息（如果 skipCache 为 true，则跳过）
+    if (!skipCache) {
+      const cachedSong = await loadSongCache(currentTrack.id)
+      if (cachedSong) {
+        console.log('[SongCache] ✓ 从缓存加载歌曲，trackId:', currentTrack.id, 'title:', cachedSong.title)
+        isStreamFromCacheRef.current = true
+        
+        // 检查是否有实际的音频 Blob（大小 > 0）
+        const hasAudioBlob = cachedSong.audioBlob instanceof Blob && cachedSong.audioBlob.size > 0
+        
+        if (hasAudioBlob) {
+          // 如果有实际的 Blob，创建 blob URL 用于播放
+          console.log('[SongCache] 使用 IndexedDB 中的音频 Blob，大小:', (cachedSong.audioBlob.size / 1024 / 1024).toFixed(2), 'MB')
+          const blobUrl = URL.createObjectURL(cachedSong.audioBlob)
+          currentBlobUrlRef.current = blobUrl // 保存 blob URL 引用，用于后续释放
+          setCurrentStream({
+            url: blobUrl,
+            _isBlobUrl: true,
+          } as any)
+        } else if (cachedSong.streamUrl) {
+          // 如果没有 Blob 但有 streamUrl，说明音频本体由 Service Worker 缓存
+          // 直接使用原始 URL，Service Worker 会自动从缓存返回
+          console.log('[SongCache] 使用 Service Worker 缓存的音频，URL:', cachedSong.streamUrl.substring(0, 50))
+          setCurrentStream({
+            url: cachedSong.streamUrl,
+            _isBlobUrl: false,
+          } as any)
+          currentBlobUrlRef.current = null // 不是 blob URL，不需要释放
+        } else {
+          console.warn('[SongCache] 缓存中既没有 Blob 也没有 streamUrl，跳过缓存')
+          // 继续执行网络请求
+        }
+        
+        // 处理缓存的歌词数据
+        if (cachedSong.lyrics && typeof cachedSong.lyrics === 'string' && cachedSong.lyrics.trim().length > 0) {
+          const lyrics = parseLRC(cachedSong.lyrics)
+          if (lyrics.length > 0) {
+            setLyrics(lyrics)
+          }
+        }
+        
+        // 如果成功设置了 stream，不需要网络请求
+        if (hasAudioBlob || cachedSong.streamUrl) {
+          setIsLoading(false)
+          return // 从缓存加载成功，不需要网络请求
+        }
+      } else {
+        console.log('[SongCache] ✗ 缓存中未找到歌曲，将从网络请求，trackId:', currentTrack.id, 'title:', currentTrack.title)
+      }
+    }
+    
+    // 缓存不存在，从网络请求
+    const plugin = getActivePluginInstance()
+    if (!plugin?.resolveStream) {
+      setError('无法解析音频地址')
+      return
+    }
+    
+    setIsLoading(true)
+    console.log('[StreamCache] 开始从网络请求音频流，trackId:', currentTrack.id, 'title:', currentTrack.title)
+    try {
+      const stream = await plugin.resolveStream(currentTrack)
+      
+      console.log('[StreamCache] 网络请求成功，trackId:', currentTrack.id, 'title:', currentTrack.title, 'url:', stream.url)
+      // 标记当前流来自网络请求（不是缓存）
+      isStreamFromCacheRef.current = false
+      
+      // 先设置音频流，让用户可以先播放
+      setCurrentStream(stream)
+      
+      // 尝试从 stream 的额外数据中获取歌词
+      // 某些插件可能将歌词数据放在 stream 的 extra 字段中
+      console.log('[Lyrics] 检查歌词数据，stream:', stream)
+      console.log('[Lyrics] stream.extra:', (stream as any)?.extra)
+      console.log('[Lyrics] stream.lrc:', (stream as any)?.lrc)
+      console.log('[Lyrics] currentTrack.extra:', currentTrack.extra)
+      
+      let lyricsFound = false
+      let lyricsText: string | undefined
+      
+      if ((stream as any)?.extra?.lrc) {
+        const lrcText = (stream as any).extra.lrc
+        console.log('[Lyrics] 从 stream.extra.lrc 获取歌词，长度:', lrcText.length)
+        if (typeof lrcText === 'string' && lrcText.trim().length > 0) {
+          lyricsText = lrcText
+          const lyrics = parseLRC(lrcText)
+          console.log('[Lyrics] 解析后的歌词行数:', lyrics.length)
+          if (lyrics.length > 0) {
+            console.log('[Lyrics] 前3行歌词:', lyrics.slice(0, 3))
+            setLyrics(lyrics)
+            lyricsFound = true
+          }
+        }
+      }
+      // 或者从 stream 的直接 lrc 字段获取
+      else if ((stream as any)?.lrc && typeof (stream as any).lrc === 'string') {
+        const lrcText = (stream as any).lrc
+        console.log('[Lyrics] 从 stream.lrc 获取歌词，长度:', lrcText.length)
+        if (lrcText.trim().length > 0) {
+          lyricsText = lrcText
+          const lyrics = parseLRC(lrcText)
+          console.log('[Lyrics] 解析后的歌词行数:', lyrics.length)
+          if (lyrics.length > 0) {
+            setLyrics(lyrics)
+            lyricsFound = true
+          }
+        }
+      }
+      // 或者从 currentTrack.extra 中获取歌词
+      else if (currentTrack.extra?.lrc && typeof currentTrack.extra.lrc === 'string') {
+        const lrcText = currentTrack.extra.lrc as string
+        console.log('[Lyrics] 从 currentTrack.extra.lrc 获取歌词，长度:', lrcText.length)
+        if (lrcText.trim().length > 0) {
+          lyricsText = lrcText
+          const lyrics = parseLRC(lrcText)
+          console.log('[Lyrics] 解析后的歌词行数:', lyrics.length)
+          if (lyrics.length > 0) {
+            setLyrics(lyrics)
+            lyricsFound = true
+          }
+        }
+      }
+      
+      // 如果以上都没有找到，尝试直接调用插件的 getMediaSource 获取完整响应
+      if (!lyricsFound && currentTrack.extra) {
+        try {
+          // 尝试直接访问原生插件的 getMediaSource 方法
+          const pluginInstance = (plugin as any)
+          const nativePlugin = pluginInstance.__nativePlugin || pluginInstance
+          
+          if (nativePlugin?.getMediaSource) {
+            console.log('[Lyrics] 尝试直接调用 getMediaSource 获取完整响应')
+            // 尝试不同的音质，获取完整响应
             const qualities = ['128', 'standard', '320', 'high', 'low', 'super']
             for (const quality of qualities) {
               try {
-                console.log(`[歌词调试] 尝试获取媒体源，quality: ${quality}`)
-                // getMediaSource 可能返回包含 lrc 的完整数据
-                const result = await activePlugin.instance.getMediaSource(track.extra as any, quality)
-                console.log(`[歌词调试] getMediaSource 返回结果 (quality: ${quality}):`, {
-                  url: result?.url,
-                  hasLrc: !!(result as any)?.lrc,
-                  lrcLength: (result as any)?.lrc?.length,
-                  lrcPreview: (result as any)?.lrc?.substring(0, 100),
-                  fullResult: result,
-                })
+                const fullResult = await nativePlugin.getMediaSource(currentTrack.extra, quality)
+                console.log('[Lyrics] getMediaSource 完整返回:', JSON.stringify(fullResult).substring(0, 500))
                 
-                if (result?.url) {
-                  // 如果返回的数据中包含 lrc，更新 track 的 extra
-                  const resultWithLrc = result as { url: string; lrc?: string; [key: string]: unknown }
-                  if (resultWithLrc.lrc && typeof resultWithLrc.lrc === 'string') {
-                    console.log('[歌词调试] 找到歌词，更新 track.extra，歌词长度:', resultWithLrc.lrc.length)
-                    updateCurrentTrackExtra({ lrc: resultWithLrc.lrc })
-                    // 立即解析歌词
-                    const lyrics = parseLRC(resultWithLrc.lrc)
-                    console.log('[歌词调试] 解析歌词结果，行数:', lyrics.length, '前3行:', lyrics.slice(0, 3))
-                    if (lyrics.length > 0) {
-                      setLyrics(lyrics)
-                      console.log('[歌词调试] 歌词已设置到 store')
-                    } else {
-                      console.warn('[歌词调试] 解析后的歌词为空')
-                    }
-                  } else {
-                    console.log('[歌词调试] 返回结果中没有 lrc 字段')
-                  }
-                  setCurrentStream({ url: result.url })
-                  setIsLoading(false)
-                  resolvingStreamRef.current = null
-                  return
+                // 检查多种可能的格式
+                let lrcText: string | undefined
+                if ((fullResult as any)?.data?.lrc) {
+                  lrcText = (fullResult as any).data.lrc
+                } else if ((fullResult as any)?.lrc) {
+                  lrcText = (fullResult as any).lrc
+                } else if ((fullResult as any)?.rawLrc) {
+                  lrcText = (fullResult as any).rawLrc
                 }
-              } catch (error) {
-                console.log(`[歌词调试] getMediaSource 失败 (quality: ${quality}):`, error)
+                
+                if (lrcText && typeof lrcText === 'string' && lrcText.trim().length > 0) {
+                  lyricsText = lrcText
+                  console.log('[Lyrics] 从 getMediaSource 完整响应中找到歌词，长度:', lrcText.length)
+                  const lyrics = parseLRC(lrcText)
+                  if (lyrics.length > 0) {
+                    setLyrics(lyrics)
+                    lyricsFound = true
+                    break
+                  }
+                }
+              } catch (e) {
                 continue
               }
             }
-          } catch (error) {
-            console.error('[歌词调试] resolveStream 错误:', error)
-            setError(error instanceof Error ? error.message : '解析失败')
-          } finally {
-            setIsLoading(false)
-            resolvingStreamRef.current = null
           }
-        }
-      }
-      
-      // 回退到使用插件的 resolveStream 方法
-      console.log('[歌词调试] 回退到使用插件的 resolveStream 方法')
-      const plugin = getActivePluginInstance()
-      if (!plugin?.resolveStream) {
-        console.error('[歌词调试] 插件没有 resolveStream 方法')
-        setError('无法解析音频地址')
-        resolvingStreamRef.current = null
-        return
-      }
-      
-      setIsLoading(true)
-      try {
-        const stream = await plugin.resolveStream(track) as { url: string; _lrc?: string }
-        console.log('[歌词调试] 插件 resolveStream 返回:', {
-          url: stream?.url,
-          hasLrc: !!stream?._lrc,
-          lrcLength: stream?._lrc?.length,
-          lrcPreview: stream?._lrc?.substring(0, 100),
-        })
-        
-        // 如果返回的数据中包含 _lrc（临时字段），提取并保存
-        if (stream?._lrc) {
-          console.log('[歌词调试] 从 resolveStream 返回中提取到歌词，长度:', stream._lrc.length)
-          updateCurrentTrackExtra({ lrc: stream._lrc })
-          // 立即解析歌词
-          const lyrics = parseLRC(stream._lrc)
-          console.log('[歌词调试] 解析歌词结果，行数:', lyrics.length)
-          if (lyrics.length > 0) {
-            setLyrics(lyrics)
-            console.log('[歌词调试] 歌词已设置到 store')
-          }
-        }
-        
-        // 只传递 url 给 setCurrentStream
-        setCurrentStream({ url: stream.url })
-      } catch (error) {
-        console.error('[歌词调试] 插件 resolveStream 错误:', error)
-        setError(error instanceof Error ? error.message : '解析失败')
-      } finally {
-        setIsLoading(false)
-        resolvingStreamRef.current = null
-      }
-    } finally {
-      // 确保在函数结束时清除标记（如果还没有清除）
-      const finalTrack = usePlayerStore.getState().currentTrack
-      if (finalTrack && resolvingStreamRef.current === finalTrack.id) {
-        resolvingStreamRef.current = null
-      }
-    }
-  }, [getActivePluginInstance, setCurrentStream, setError, setIsLoading, updateCurrentTrackExtra, setLyrics])
-  
-  // 获取歌词（从 track.extra 或缓存中读取）
-  const fetchLyrics = useCallback(() => {
-    // 使用最新的 currentTrack（从 store 中获取）
-    const track = usePlayerStore.getState().currentTrack
-    console.log('[歌词调试] fetchLyrics 被调用，currentTrack:', track?.id, track?.title)
-    
-    if (!track) {
-      console.log('[歌词调试] fetchLyrics: currentTrack 为空')
-      setLyrics([])
-      return
-    }
-
-    try {
-      // 首先从 track.extra 中读取 lrc 字段
-      const extra = track.extra as { lrc?: string; rid?: string; [key: string]: unknown } | undefined
-      console.log('[歌词调试] fetchLyrics - track.extra:', {
-        hasExtra: !!extra,
-        hasLrc: !!extra?.lrc,
-        lrcType: typeof extra?.lrc,
-        lrcLength: typeof extra?.lrc === 'string' ? extra.lrc.length : 0,
-        lrcPreview: typeof extra?.lrc === 'string' ? extra.lrc.substring(0, 100) : undefined,
-        extraKeys: extra ? Object.keys(extra) : [],
-        rid: extra?.rid,
-      })
-      
-      let lrcText: string | undefined = extra?.lrc
-      
-      // 如果 extra 中没有 lrc，尝试从缓存中获取
-      if (!lrcText) {
-        // 尝试多个可能的 trackId：rid、id、以及它们的字符串形式
-        // 还要尝试从 extra 中查找可能的 QQ 音乐 ID
-        const possibleIds = [
-          extra?.rid,
-          track.id,
-          String(extra?.rid || ''),
-          String(track.id),
-          // 尝试从 extra 中查找可能的 songmid 或其他 ID 字段
-          (extra as any)?.songmid,
-          String((extra as any)?.songmid || ''),
-        ].filter(Boolean) as string[]
-        
-        console.log('[歌词调试] 尝试从缓存获取歌词，可能的 trackId:', possibleIds)
-        // 通过 window 访问 lyricCache（仅在开发环境）
-        const globalCache = (window as any).lyricCache as Map<string, string> | undefined
-        if (globalCache) {
-          console.log('[歌词调试] 缓存中的所有 key:', Array.from(globalCache.keys()))
-        }
-        
-        for (const trackId of possibleIds) {
-          lrcText = getLyricFromCache(trackId)
-          if (lrcText) {
-            console.log('[歌词调试] 从缓存中找到歌词，使用的 trackId:', trackId, '歌词长度:', lrcText.length)
-            // 保存到 track.extra 中，同时保存 rid（如果找到了）
-            const updateData: { lrc: string; rid?: string } = { lrc: lrcText }
-            // 如果 trackId 看起来像 QQ 音乐的 ID（以 00 开头），保存为 rid
-            if (trackId && trackId.startsWith('00')) {
-              updateData.rid = trackId
-            } else if (extra?.rid) {
-              updateData.rid = extra.rid
-            }
-            updateCurrentTrackExtra(updateData)
-            break
-          }
-        }
-        
-        if (!lrcText) {
-          console.log('[歌词调试] 缓存中也没有找到歌词，尝试遍历所有缓存项')
-          // 如果还是没找到，尝试遍历所有缓存项（作为最后的尝试）
-          // 通过 window 访问 lyricCache（仅在开发环境）
-          const globalCache = (window as any).lyricCache as Map<string, string> | undefined
-          if (globalCache) {
-            for (const [cachedId, cachedLrc] of globalCache.entries()) {
-              console.log('[歌词调试] 检查缓存项:', cachedId)
-              // 如果缓存中有任何歌词，就使用它（可能是最近的请求）
-              if (cachedLrc && cachedLrc.length > 0) {
-                console.log('[歌词调试] 使用缓存中的歌词（可能是最近的请求）:', cachedId)
-                lrcText = cachedLrc
-                const updateData: { lrc: string; rid?: string } = { lrc: lrcText }
-                if (cachedId.startsWith('00')) {
-                  updateData.rid = cachedId
-                }
-                updateCurrentTrackExtra(updateData)
-                break
+          
+          // 如果还是没有，尝试 getLyric 方法
+          if (!lyricsFound && nativePlugin?.getLyric) {
+            console.log('[Lyrics] 尝试使用 getLyric 方法获取歌词')
+            const lyricResult = await nativePlugin.getLyric(currentTrack.extra)
+            console.log('[Lyrics] getLyric 返回:', lyricResult)
+            if (lyricResult?.rawLrc && typeof lyricResult.rawLrc === 'string') {
+              lyricsText = lyricResult.rawLrc
+              const lyrics = parseLRC(lyricResult.rawLrc)
+              console.log('[Lyrics] 从 getLyric 解析后的歌词行数:', lyrics.length)
+              if (lyrics.length > 0) {
+                setLyrics(lyrics)
+                lyricsFound = true
               }
             }
           }
+        } catch (error) {
+          console.warn('[Lyrics] 直接调用插件方法失败:', error)
         }
       }
       
-      if (lrcText) {
-        console.log('[歌词调试] 找到 lrc 文本，长度:', lrcText.length, '前100字符:', lrcText.substring(0, 100))
-        
-        if (lrcText && typeof lrcText === 'string' && lrcText.trim()) {
-          const lyrics = parseLRC(lrcText)
-          console.log('[歌词调试] 解析歌词结果，行数:', lyrics.length)
-          if (lyrics.length > 0) {
-            console.log('[歌词调试] 前5行歌词:', lyrics.slice(0, 5))
-            setLyrics(lyrics)
-            console.log('[歌词调试] 歌词已设置到 store')
-            return
-          } else {
-            console.warn('[歌词调试] 解析后的歌词为空，原始文本:', lrcText.substring(0, 200))
-          }
-        } else {
-          console.warn('[歌词调试] lrc 文本无效:', { lrcText, type: typeof lrcText, isEmpty: !lrcText?.trim() })
-        }
-      } else {
-        console.log('[歌词调试] 没有找到歌词（extra 和缓存都没有）')
+      if (!lyricsFound) {
+        // 如果没有歌词，清空歌词列表
+        console.log('[Lyrics] 未找到歌词数据，清空歌词列表')
+        setLyrics([])
       }
-
-      // 如果没有找到歌词，清空
-      console.log('[歌词调试] 没有找到歌词，清空歌词列表')
-      setLyrics([])
+      
+      // 标记待缓存，等待音频元素加载完成后缓存（包含完整的歌曲信息）
+      pendingCacheTrackRef.current = { track: currentTrack, stream: stream, lyrics: lyricsText }
+      console.log('[SongCache] ✓ 已设置待缓存标记，trackId:', currentTrack.id, 'title:', currentTrack.title, 'hasLyrics:', !!lyricsText, 'streamUrl:', stream.url.substring(0, 50))
     } catch (error) {
-      console.error('[歌词调试] fetchLyrics 错误:', error)
-      setLyrics([])
-    }
-  }, [setLyrics, updateCurrentTrackExtra])
-
-  // 监听歌词更新事件
-  useEffect(() => {
-    const handleLyricUpdated = (event: CustomEvent<{ trackId: string; lrc: string; rid?: string; urlId?: string }>) => {
-      console.log('[歌词调试] 收到歌词更新事件:', event.detail)
-      // 使用最新的 currentTrack（从 store 中获取）
-      const track = usePlayerStore.getState().currentTrack
-      if (!track) {
-        console.log('[歌词调试] 当前没有播放歌曲，忽略歌词更新事件')
-        return
+      console.error('[StreamCache] 网络请求失败，trackId:', currentTrack.id, 'title:', currentTrack.title, 'error:', error)
+      setError(error instanceof Error ? error.message : '解析失败')
+      // 如果重试失败，重置重试标记
+      if (isRetryingRef.current) {
+        console.log('[StreamCache] 重试失败，重置重试标记')
+        isRetryingRef.current = false
+        wasPlayingBeforeRetryRef.current = false
+        retryCountRef.current = 0
+        lastFailedTrackIdRef.current = undefined
       }
-      
-      const extra = track.extra as { rid?: string; [key: string]: unknown } | undefined
-      const currentRid = extra?.rid
-      const currentId = track.id
-      const eventTrackId = event.detail.trackId
-      const eventRid = event.detail.rid || event.detail.trackId
-      const eventUrlId = event.detail.urlId
-      
-      console.log('[歌词调试] 匹配检查:', {
-        currentId,
-        currentRid,
-        eventTrackId,
-        eventRid,
-        eventUrlId,
-        idMatch: currentId === eventTrackId || currentId === eventRid || currentId === eventUrlId,
-        ridMatch: currentRid === eventTrackId || currentRid === eventRid || currentRid === eventUrlId,
-      })
-      
-      // 匹配逻辑：如果当前正在解析流（没有 currentStream），或者 id/rid 任一匹配，就接受歌词
-      // 这样可以处理解析流时的情况，即使 ID 不完全匹配
-      const currentStreamState = usePlayerStore.getState().currentStream
-      const isResolvingStream = !currentStreamState
-      const idMatches = currentId === eventTrackId || currentId === eventRid || currentId === eventUrlId
-      const ridMatches = currentRid === eventTrackId || currentRid === eventRid || currentRid === eventUrlId
-      
-      if (isResolvingStream || idMatches || ridMatches) {
-        console.log('[歌词调试] 歌词更新事件匹配当前歌曲，更新歌词', { isResolvingStream, idMatches, ridMatches })
-        // 同时更新 lrc 和 rid（如果事件中有 rid）
-        const updateData: { lrc: string; rid?: string } = { lrc: event.detail.lrc }
-        if (eventRid) {
-          updateData.rid = eventRid
-        }
-        updateCurrentTrackExtra(updateData)
-        // 延迟一下确保 extra 已更新
-        setTimeout(() => fetchLyrics(), 50)
-      } else {
-        console.log('[歌词调试] 歌词更新事件不匹配当前歌曲，忽略')
-      }
+    } finally {
+      setIsLoading(false)
     }
-    
-    window.addEventListener('lyricUpdated', handleLyricUpdated as EventListener)
-    return () => {
-      window.removeEventListener('lyricUpdated', handleLyricUpdated as EventListener)
-    }
-  }, [updateCurrentTrackExtra, fetchLyrics])
-
-  // 当 currentTrack 改变时解析流和获取歌词
+  }, [currentTrack, getActivePluginInstance, setCurrentStream, setError, setIsLoading, setLyrics])
+  
+  // 当 currentTrack 改变时解析流
   useEffect(() => {
-    if (!currentTrack) {
-      // 如果没有当前歌曲，清空歌词
-      setLyrics([])
-      resolvingStreamRef.current = null
+    // 如果正在重试，不触发这个 effect（避免重复请求）
+    if (isRetryingRef.current) {
       return
     }
-    
-    const trackId = currentTrack.id
-    console.log('[歌词调试] useEffect: currentTrack 改变，trackId:', trackId, 'currentStream:', !!currentStream)
-    
-    // 重置解析标记（如果 track 改变了）
-    if (resolvingStreamRef.current && resolvingStreamRef.current !== trackId) {
-      console.log('[歌词调试] useEffect: 切换歌曲，重置解析标记')
-      resolvingStreamRef.current = null
-    }
-    
-    // 如果正在解析同一个 track，跳过
-    if (resolvingStreamRef.current === trackId) {
-      console.log('[歌词调试] useEffect: 正在解析中，跳过')
-      return
-    }
-    
-    // 先尝试从现有数据中获取歌词
-    console.log('[歌词调试] useEffect: 调用 fetchLyrics')
-    fetchLyrics()
-    
-    // 只有在没有 currentStream 时才解析流（setCurrentTrack 已经将 currentStream 设为 null）
-    if (!currentStream) {
-      console.log('[歌词调试] useEffect: 没有 currentStream，调用 resolveStream')
-      // 解析流时会自动提取并保存歌词
+    if (currentTrack && !currentStream) {
+      console.log('[StreamCache] 检测到新歌曲，开始解析流，trackId:', currentTrack.id, 'title:', currentTrack.title)
+      // 重置缓存标记
+      isStreamFromCacheRef.current = false
       resolveStream()
-    } else {
-      console.log('[歌词调试] useEffect: 已有 currentStream，跳过解析，但会再次尝试获取歌词')
-      // 即使有 currentStream，也再次尝试获取歌词（可能歌词在解析流后才到达）
-      setTimeout(() => {
-        fetchLyrics()
-      }, 100)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTrack?.id, currentStream]) // 依赖 track id 和 currentStream
+  }, [currentTrack, currentStream, resolveStream])
   
   // 当 currentStream 改变时加载音频
   useEffect(() => {
     const audio = audioRef.current
-    if (!audio || !currentStream) return
+    if (!audio || !currentStream) {
+      // 释放旧的 blob URL
+      if (currentBlobUrlRef.current) {
+        console.log('[Audio] 释放旧的 blob URL:', currentBlobUrlRef.current)
+        URL.revokeObjectURL(currentBlobUrlRef.current)
+        currentBlobUrlRef.current = null
+      }
+      currentAudioUrlRef.current = ''
+      if (!currentTrack) {
+        currentTrackIdRef.current = undefined
+      }
+      return
+    }
     
-    // 使用代理 URL 避免 CORS 问题
-    audio.src = proxyMediaUrl(currentStream.url)
+    // 检查是否是新的歌曲
+    const isNewTrack = currentTrack?.id !== currentTrackIdRef.current
+    if (isNewTrack) {
+      console.log('[Audio] 检测到新歌曲，准备加载音频，trackId:', currentTrack?.id, 'title:', currentTrack?.title)
+      // 释放旧的 blob URL
+      if (currentBlobUrlRef.current) {
+        console.log('[Audio] 释放旧的 blob URL:', currentBlobUrlRef.current)
+        URL.revokeObjectURL(currentBlobUrlRef.current)
+        currentBlobUrlRef.current = null
+      }
+      currentTrackIdRef.current = currentTrack?.id
+      // 新歌曲，重置播放进度和重试计数器
+      setCurrentTime(0)
+      hasRestoredProgressRef.current = false
+      retryCountRef.current = 0
+      lastFailedTrackIdRef.current = undefined
+      // 注意：不要在这里清除 pendingCacheTrackRef，因为它是在 resolveStream 中设置的
+      // 如果是从缓存加载的，resolveStream 不会设置它；如果是从网络加载的，resolveStream 会设置它
+    }
+    
+    // 检查是否是 blob URL（来自缓存）
+    const isBlobUrl = (currentStream as any)?._isBlobUrl
+    let newSrc: string = currentStream.url
+    
+    if (isBlobUrl) {
+      currentBlobUrlRef.current = currentStream.url
+      console.log('[Audio] 使用缓存的 blob URL，trackId:', currentTrack?.id, 'title:', currentTrack?.title)
+    } else {
+      console.log('[Audio] 使用原始 URL，trackId:', currentTrack?.id, 'title:', currentTrack?.title, 'url:', currentStream.url.substring(0, 60))
+      currentBlobUrlRef.current = null
+    }
+    console.log('[Audio] 设置音频源，trackId:', currentTrack?.id, 'title:', currentTrack?.title, 'url:', currentStream.url, 'isFromCache:', isStreamFromCacheRef.current, 'isBlobUrl:', isBlobUrl)
+    
+    // 如果 URL 没有改变，不需要重新加载
+    if (currentAudioUrlRef.current === currentStream.url) {
+      // URL 相同，只需要恢复播放进度（如果有，且不是新歌曲）
+      if (!isNewTrack) {
+        const savedTime = usePlayerStore.getState().currentTime
+        if (savedTime > 0 && (!audio.duration || savedTime < audio.duration)) {
+          audio.currentTime = savedTime
+        }
+      } else {
+        // 新歌曲，确保从 0 开始
+        audio.currentTime = 0
+      }
+      return
+    }
+    
+    // 保存当前播放进度（如果有，且不是新歌曲）
+    const savedTime = isNewTrack ? 0 : usePlayerStore.getState().currentTime
+    const wasPlaying = usePlayerStore.getState().isPlaying
+    
+    // 更新 URL 引用
+    currentAudioUrlRef.current = currentStream.url
+    
+    // 重置恢复进度标记，允许新歌曲恢复进度
+    hasRestoredProgressRef.current = false
+    
+    // 检查是否需要 MSE 播放（如 B站 m4s 格式）
+    const requiresMSE = needsMSEPlayback(newSrc) && !isBlobUrl
+    
+    if (requiresMSE && isMSESupported()) {
+      console.log('[Audio] 检测到 m4s 格式，使用 MSE 播放')
+      // 清理之前的 MSE 资源
+      cleanupMSE(audio)
+      
+      // 使用 MSE 加载音频
+      loadMSEAudio(audio, newSrc)
+        .then(() => {
+          console.log('[Audio] MSE 加载成功')
+          // 如果是新歌曲，从 0 开始；否则恢复播放进度
+          if (isNewTrack) {
+            audio.currentTime = 0
+          } else if (savedTime > 0 && (!audio.duration || savedTime < audio.duration)) {
+            audio.currentTime = savedTime
+          }
+          // 如果之前正在播放，继续播放
+          const shouldPlay = wasPlaying || (isRetryingRef.current && wasPlayingBeforeRetryRef.current)
+          if (shouldPlay) {
+            audio.play().catch(() => setIsPlaying(false))
+          }
+          // 重置重试标记
+          if (isRetryingRef.current) {
+            isRetryingRef.current = false
+            wasPlayingBeforeRetryRef.current = false
+            retryCountRef.current = 0
+            lastFailedTrackIdRef.current = undefined
+          }
+        })
+        .catch((error) => {
+          console.error('[Audio] MSE 加载失败:', error)
+          setError(`音频加载失败: ${error.message}`)
+        })
+      return // MSE 模式下直接返回，不执行后续的 audio.src 设置
+    }
+    
+    // 普通音频格式，直接设置 src
+    audio.src = newSrc
+    
+    // 设置加载完成后的回调
+    const handleCanPlay = () => {
+      // 如果是新歌曲，从 0 开始；否则恢复播放进度（如果有）
+      if (isNewTrack) {
+        audio.currentTime = 0
+      } else if (savedTime > 0 && (!audio.duration || savedTime < audio.duration)) {
+        audio.currentTime = savedTime
+      }
+      // 如果之前正在播放，或者正在重试且重试前正在播放，继续播放
+      const shouldPlay = wasPlaying || (isRetryingRef.current && wasPlayingBeforeRetryRef.current)
+      if (shouldPlay) {
+        console.log('[Audio] 恢复播放，wasPlaying:', wasPlaying, 'isRetrying:', isRetryingRef.current, 'wasPlayingBeforeRetry:', wasPlayingBeforeRetryRef.current)
+        audio.play().catch(() => setIsPlaying(false))
+      }
+      // 重置重试标记
+      if (isRetryingRef.current) {
+        isRetryingRef.current = false
+        wasPlayingBeforeRetryRef.current = false
+        retryCountRef.current = 0
+        lastFailedTrackIdRef.current = undefined
+      }
+      audio.removeEventListener('canplay', handleCanPlay)
+    }
+    
+    // 设置完全加载完成后的回调（用于缓存音频数据）
+    const handleCanPlayThrough = () => {
+      console.log('[SongCache] canplaythrough 事件触发，readyState:', audio.readyState, 'pendingCacheTrackRef:', !!pendingCacheTrackRef.current, 'isStreamFromCache:', isStreamFromCacheRef.current, 'audio.src:', audio.src.substring(0, 50))
+      // 音频完全加载完成，从音频元素获取完整音频数据并缓存完整的歌曲信息
+      if (pendingCacheTrackRef.current && !isStreamFromCacheRef.current) {
+        const { track, stream, lyrics } = pendingCacheTrackRef.current
+        console.log('[SongCache] ✓ 音频完全加载完成，开始缓存完整歌曲数据，trackId:', track.id, 'title:', track.title)
+        cacheAudioFromElement(track, audio, stream, lyrics).catch((error) => {
+          console.error('[SongCache] ✗ 缓存歌曲数据失败:', error)
+        })
+        // 清除待缓存标记
+        pendingCacheTrackRef.current = null
+      } else {
+        console.log('[SongCache] 跳过缓存：pendingCacheTrackRef=', !!pendingCacheTrackRef.current, 'isStreamFromCache=', isStreamFromCacheRef.current)
+      }
+      audio.removeEventListener('canplaythrough', handleCanPlayThrough)
+    }
+    
+    // 监听 loadeddata 事件，作为备用缓存触发点（某些情况下 canplaythrough 可能不触发）
+    const handleLoadedData = () => {
+      console.log('[SongCache] loadeddata 事件触发，readyState:', audio.readyState, 'pendingCacheTrackRef:', !!pendingCacheTrackRef.current, 'isStreamFromCache:', isStreamFromCacheRef.current)
+      // 如果 canplaythrough 没有触发，使用 loadeddata 作为备用
+      if (pendingCacheTrackRef.current && !isStreamFromCacheRef.current && audio.readyState >= HTMLMediaElement.HAVE_ENOUGH_DATA) {
+        const { track, stream, lyrics } = pendingCacheTrackRef.current
+        console.log('[SongCache] ✓ 通过 loadeddata 事件缓存完整歌曲数据，trackId:', track.id, 'title:', track.title)
+        cacheAudioFromElement(track, audio, stream, lyrics).catch((error) => {
+          console.error('[SongCache] ✗ 缓存歌曲数据失败:', error)
+        })
+        // 清除待缓存标记
+        pendingCacheTrackRef.current = null
+      }
+      audio.removeEventListener('loadeddata', handleLoadedData)
+    }
+    
+    audio.addEventListener('canplay', handleCanPlay)
+    audio.addEventListener('canplaythrough', handleCanPlayThrough)
+    audio.addEventListener('loadeddata', handleLoadedData)
     audio.load()
     
-    if (isPlaying) {
-      audio.play().catch(() => setIsPlaying(false))
+    // 如果音频已经可以播放，立即恢复进度
+    if (audio.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      console.log('[Audio] 音频已就绪，立即调用 handleCanPlay')
+      handleCanPlay()
     }
-  }, [currentStream])
+    
+    // 如果音频已经完全加载，立即缓存（同步检查）
+    console.log('[SongCache] 检查立即缓存条件：readyState=', audio.readyState, 'HAVE_ENOUGH_DATA=', HTMLMediaElement.HAVE_ENOUGH_DATA, 'pendingCacheTrackRef=', !!pendingCacheTrackRef.current, 'isStreamFromCache=', isStreamFromCacheRef.current)
+    if (audio.readyState >= HTMLMediaElement.HAVE_ENOUGH_DATA && pendingCacheTrackRef.current && !isStreamFromCacheRef.current) {
+      const { track, stream, lyrics } = pendingCacheTrackRef.current
+      console.log('[SongCache] ✓ 音频已完全加载，立即缓存完整歌曲数据，trackId:', track.id, 'title:', track.title)
+      cacheAudioFromElement(track, audio, stream, lyrics).catch((error) => {
+        console.error('[SongCache] ✗ 缓存歌曲数据失败:', error)
+      })
+      pendingCacheTrackRef.current = null
+    }
+  }, [currentStream, currentTrack?.id, setIsPlaying, setCurrentTime])
   
   // 播放/暂停控制
   useEffect(() => {
     const audio = audioRef.current
     if (!audio || !currentStream) return
     
+    // 检查是否是新的歌曲
+    const isNewTrack = currentTrack?.id !== currentTrackIdRef.current
+    
     if (isPlaying) {
+      // 恢复播放时，确保使用保存的播放进度（但新歌曲从 0 开始）
+      if (!isNewTrack) {
+        const savedTime = usePlayerStore.getState().currentTime
+        if (savedTime > 0 && Math.abs(audio.currentTime - savedTime) > 1) {
+          // 如果音频的 currentTime 和保存的进度差距超过1秒，使用保存的进度
+          audio.currentTime = savedTime
+        }
+      } else {
+        // 新歌曲，确保从 0 开始
+        audio.currentTime = 0
+      }
       audio.play().catch(() => setIsPlaying(false))
     } else {
+      // 暂停时，保存当前播放进度
+      if (audio.currentTime > 0) {
+        setCurrentTime(audio.currentTime)
+      }
       audio.pause()
     }
-  }, [isPlaying, currentStream, setIsPlaying])
+  }, [isPlaying, currentStream, currentTrack?.id, setIsPlaying, setCurrentTime])
   
   // 音量同步
   useEffect(() => {
@@ -454,13 +872,32 @@ function App() {
   
   const handleTimeUpdate = () => {
     if (audioRef.current) {
-      setCurrentTime(audioRef.current.currentTime)
+      const newTime = audioRef.current.currentTime
+      setCurrentTime(newTime)
+      // 注意：不在这里更新 Media Session 的播放位置，避免频繁刷新按钮
+      // 播放位置只在歌曲变化或播放状态变化时更新
     }
   }
   
   const handleLoadedMetadata = () => {
     if (audioRef.current) {
-      setDuration(audioRef.current.duration)
+      const audio = audioRef.current
+      console.log('[Audio] 音频元数据加载成功，trackId:', currentTrack?.id, 'title:', currentTrack?.title, 'duration:', audio.duration, 'isFromCache:', isStreamFromCacheRef.current)
+      setDuration(audio.duration)
+      // 如果是首次从缓存恢复，且有保存的播放进度，则恢复进度
+      // 但如果是新歌曲（track ID 改变），不应该恢复进度
+      const isNewTrack = currentTrack?.id !== currentTrackIdRef.current
+      if (!hasRestoredProgressRef.current && !isNewTrack) {
+        const savedTime = usePlayerStore.getState().currentTime
+        if (savedTime > 0 && savedTime < audio.duration) {
+          console.log('[Audio] 恢复播放进度:', savedTime)
+          audio.currentTime = savedTime
+          hasRestoredProgressRef.current = true
+        }
+      } else if (isNewTrack) {
+        // 新歌曲，确保从 0 开始
+        audio.currentTime = 0
+      }
     }
   }
   
@@ -478,6 +915,251 @@ function App() {
     }
   }
   
+  const handleRetry = () => {
+    console.log('[StreamCache] 用户点击重试，trackId:', currentTrack?.id, 'title:', currentTrack?.title)
+    // 重置重试计数器（用户手动重试）
+    retryCountRef.current = 0
+    lastFailedTrackIdRef.current = undefined
+    
+    // 不清除缓存，直接尝试重新获取（成功后会自动更新缓存）
+    console.log('[StreamCache] 用户手动重试，尝试重新获取音频流（不清除缓存）')
+    isStreamFromCacheRef.current = false
+    // 清除错误状态
+    setError(null)
+    // 重新设置 currentStream 为 null，触发重新解析
+    setCurrentStream(null)
+    // 重新解析流（跳过缓存，直接从网络请求，成功后会自动更新缓存）
+    if (currentTrack) {
+      resolveStream(true)
+    }
+  }
+  
+  const handleAudioError = async (e: React.SyntheticEvent<HTMLAudioElement, Event>) => {
+    const audio = e.currentTarget
+    const error = audio.error
+    const errorCode = error?.code
+    const errorMessage = error?.message || '未知错误'
+    const currentUrl = audio.src
+    
+    console.error('[Audio] 音频加载失败，trackId:', currentTrack?.id, 'title:', currentTrack?.title)
+    console.error('[Audio] 错误代码:', errorCode, '错误信息:', errorMessage)
+    console.error('[Audio] 音频URL:', currentUrl)
+    console.error('[Audio] 网络状态:', audio.networkState, '就绪状态:', audio.readyState)
+    
+    // 检查是否是同一个 trackId 重复失败（防止死循环）
+    // 使用 trackId 而不是 URL，因为每次重试 URL 可能会变化
+    if (lastFailedTrackIdRef.current === currentTrack?.id) {
+      retryCountRef.current += 1
+      console.warn('[Audio] 同一歌曲重复失败，重试次数:', retryCountRef.current, 'trackId:', currentTrack?.id)
+    } else {
+      // 新的歌曲失败，重置计数器
+      lastFailedTrackIdRef.current = currentTrack?.id
+      retryCountRef.current = 1
+      console.log('[Audio] 新歌曲失败，初始化重试次数为 1，trackId:', currentTrack?.id)
+    }
+    
+    // 如果超过最大重试次数，停止重试
+    if (retryCountRef.current > maxRetryCount) {
+      console.error('[Audio] 超过最大重试次数，停止重试，trackId:', currentTrack?.id, '重试次数:', retryCountRef.current)
+      setError(`音频加载失败（已重试 ${maxRetryCount} 次）: ${errorMessage}`)
+      // 停止音频元素的自动重试（清除 src 可以阻止浏览器继续尝试加载）
+      const audio = audioRef.current
+      if (audio && audio.src === currentUrl) {
+        console.log('[Audio] 清除音频源，阻止自动重试')
+        audio.pause()
+        audio.removeAttribute('src')
+        audio.load()
+      }
+      // 重置重试标记
+      isRetryingRef.current = false
+      wasPlayingBeforeRetryRef.current = false
+      retryCountRef.current = 0
+      lastFailedTrackIdRef.current = undefined
+      setIsPlaying(false)
+      return
+    }
+    
+    // 如果当前流来自缓存，检查失败原因
+    if (isStreamFromCacheRef.current && currentTrack) {
+      // 检查是否是 blob URL（音频文件缓存）
+      const isBlobUrl = currentUrl.startsWith('blob:')
+      
+      if (isBlobUrl) {
+        // blob URL 失败，可能是浏览器问题或 blob URL 已失效
+        // 尝试重新从 IndexedDB 加载音频文件
+        console.warn('[StreamCache] blob URL 加载失败，尝试重新从 IndexedDB 加载音频文件，trackId:', currentTrack.id)
+        
+        // 检查是否是网络错误（不应该影响 blob URL）
+        const isNetworkError = errorCode === 4 || errorMessage.includes('network') || errorMessage.includes('ERR_INTERNET_DISCONNECTED')
+        if (isNetworkError) {
+          // 网络错误不应该影响本地 blob URL，可能是其他问题
+          console.warn('[StreamCache] blob URL 在网络错误时失败，可能是浏览器问题')
+        }
+        
+        // 尝试重新加载音频文件
+        const loadAudioFile = async () => {
+          try {
+            const cachedSong = await loadSongCache(currentTrack.id)
+            if (cachedSong) {
+              // 重新创建 blob URL
+              const blobUrl = URL.createObjectURL(cachedSong.audioBlob)
+              console.log('[SongCache] 重新从缓存加载完整歌曲成功，创建新的 blob URL')
+              
+              // 释放旧的 blob URL
+              if (currentBlobUrlRef.current) {
+                URL.revokeObjectURL(currentBlobUrlRef.current)
+              }
+              
+              // 设置新的音频流
+              setCurrentStream({
+                url: blobUrl,
+                _isBlobUrl: true,
+              } as any)
+              
+              // 如果有缓存的歌词，也设置
+              if (cachedSong.lyrics) {
+                const lyrics = parseLRC(cachedSong.lyrics)
+                if (lyrics.length > 0) {
+                  setLyrics(lyrics)
+                }
+              }
+              
+              setError(null)
+              return true
+            }
+          } catch (error) {
+            console.error('[SongCache] 重新加载歌曲缓存失败:', error)
+          }
+          return false
+        }
+        
+        // 尝试重新加载，如果失败则显示错误
+        const reloaded = await loadAudioFile()
+        if (!reloaded) {
+          console.error('[StreamCache] 无法重新加载音频文件，显示错误信息')
+          setError(`音频加载失败，请点击重试按钮重新获取`)
+          // 停止音频元素的自动重试
+          const audio = audioRef.current
+          if (audio && audio.src === currentUrl) {
+            audio.pause()
+            audio.removeAttribute('src')
+            audio.load()
+          }
+          setIsPlaying(false)
+        }
+        return
+      }
+      
+      // 非 blob URL（URL 缓存），检查是否是网络错误
+      const isNetworkError = errorCode === 4 || errorMessage.includes('network') || errorMessage.includes('ERR_INTERNET_DISCONNECTED')
+      
+      // 如果是网络错误，保留缓存，只显示错误信息（不自动清除缓存）
+      if (isNetworkError) {
+        if (retryCountRef.current > maxRetryCount) {
+          console.error('[StreamCache] 网络错误且超过重试次数，保留缓存，停止重试，trackId:', currentTrack.id)
+          setError(`网络连接失败（已重试 ${maxRetryCount} 次），请检查网络连接。缓存已保留，网络恢复后可继续播放。`)
+          // 停止音频元素的自动重试
+          const audio = audioRef.current
+          if (audio && audio.src === currentUrl) {
+            console.log('[Audio] 清除音频源，阻止自动重试')
+            audio.pause()
+            audio.removeAttribute('src')
+            audio.load()
+          }
+          // 重置重试标记
+          isRetryingRef.current = false
+          wasPlayingBeforeRetryRef.current = false
+          retryCountRef.current = 0
+          lastFailedTrackIdRef.current = undefined
+          setIsPlaying(false)
+        } else {
+          // 网络错误但未超过重试次数，只显示错误，不清除缓存
+          console.log('[StreamCache] 网络错误，保留缓存，等待网络恢复，重试次数:', retryCountRef.current)
+          setError(`网络连接失败，正在重试... (${retryCountRef.current}/${maxRetryCount})`)
+        }
+        return
+      }
+      
+      // URL 缓存失效（如 410 Gone），不清除缓存，只提示用户可以重试
+      console.log('[StreamCache] 缓存的 URL 已失效，需要重新请求，trackId:', currentTrack.id, 'title:', currentTrack.title)
+      console.log('[StreamCache] 注意：缓存不会被自动清除，用户可以通过重试按钮重新获取')
+      
+      // 设置错误信息，提示用户可以重试
+      setError(`音频 URL 已失效，请点击重试按钮重新获取`)
+      
+      // 停止音频元素的自动重试
+      const audio = audioRef.current
+      if (audio && audio.src === currentUrl) {
+        console.log('[Audio] 停止当前音频加载')
+        audio.pause()
+        audio.removeAttribute('src')
+        audio.load()
+      }
+      
+      // 重置重试标记
+      isRetryingRef.current = false
+      wasPlayingBeforeRetryRef.current = false
+      retryCountRef.current = 0
+      lastFailedTrackIdRef.current = undefined
+      setIsPlaying(false)
+    } else {
+      // 非缓存流失败
+      // 检查是否是网络错误（错误代码 4 通常是网络错误）
+      const isNetworkError = errorCode === 4 || errorMessage.includes('network') || errorMessage.includes('ERR_INTERNET_DISCONNECTED')
+      
+      if (isNetworkError && retryCountRef.current <= maxRetryCount) {
+        // 网络错误，尝试重试
+        console.log('[Audio] 网络错误，尝试重试，重试次数:', retryCountRef.current, '/', maxRetryCount, 'trackId:', currentTrack?.id)
+        isRetryingRef.current = true
+        wasPlayingBeforeRetryRef.current = isPlaying
+        
+        // 显示重试提示
+        setError(`网络连接失败，正在重试... (${retryCountRef.current}/${maxRetryCount})`)
+        
+        // 延迟重试，避免立即重试，使用指数退避
+        const delay = Math.min(1000 * Math.pow(2, retryCountRef.current - 1), 10000) // 最多10秒
+        console.log('[Audio] 将在', delay, '毫秒后重试')
+        
+        setTimeout(() => {
+          // 检查是否仍然是同一首歌曲（防止切换歌曲后仍然重试）
+          if (currentTrack && currentTrack.id === lastFailedTrackIdRef.current) {
+            console.log('[Audio] 执行重试，重试次数:', retryCountRef.current, 'trackId:', currentTrack.id)
+            setError(null)
+            setCurrentStream(null)
+            resolveStream(true)
+          } else {
+            console.log('[Audio] 歌曲已切换，取消重试，当前 trackId:', currentTrack?.id, '失败的 trackId:', lastFailedTrackIdRef.current)
+            isRetryingRef.current = false
+            wasPlayingBeforeRetryRef.current = false
+          }
+        }, delay)
+      } else {
+        // 非网络错误或超过重试次数，只设置错误状态
+        console.log('[Audio] 音频流加载失败，设置错误状态，重试次数:', retryCountRef.current, 'isNetworkError:', isNetworkError)
+        if (retryCountRef.current > maxRetryCount) {
+          setError(`音频加载失败（已重试 ${maxRetryCount} 次）: ${errorMessage}`)
+        } else {
+          setError(`音频加载失败: ${errorMessage}`)
+        }
+        // 重置重试标记
+        isRetryingRef.current = false
+        wasPlayingBeforeRetryRef.current = false
+        retryCountRef.current = 0
+        lastFailedTrackIdRef.current = undefined
+        
+        // 停止音频元素的自动重试
+        const audio = audioRef.current
+        if (audio && audio.src === currentUrl) {
+          console.log('[Audio] 清除音频源，阻止自动重试')
+          audio.pause()
+          audio.removeAttribute('src')
+          audio.load()
+        }
+        setIsPlaying(false)
+      }
+    }
+  }
+  
   return (
     <div className="h-screen h-[100dvh] flex flex-col relative overflow-hidden grid-bg">
       {/* 全局音频元素 */}
@@ -486,7 +1168,7 @@ function App() {
         onTimeUpdate={handleTimeUpdate}
         onLoadedMetadata={handleLoadedMetadata}
         onEnded={handleEnded}
-        onError={() => setError('音频加载失败')}
+        onError={handleAudioError}
         preload="auto"
       />
       
@@ -497,8 +1179,8 @@ function App() {
       </div>
       
       {/* 头部 */}
-      <header className="relative z-10 px-4 py-3 sm:px-6 sm:py-4 flex-shrink-0">
-        <div className="flex items-center justify-between max-w-4xl mx-auto">
+      <header className="relative z-50 px-4 py-3 sm:px-6 sm:py-4 flex-shrink-0">
+        <div className="flex items-center justify-between max-w-2xl mx-auto w-full">
           <motion.div 
             className="flex items-center gap-2.5"
             initial={{ opacity: 0, x: -20 }}
@@ -512,45 +1194,114 @@ function App() {
             </h1>
           </motion.div>
           
-          <motion.p 
-            className="text-xs text-surface-400 hidden sm:block"
+          <motion.div
+            className="relative z-50 flex items-center gap-2"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ delay: 0.2 }}
+            data-plugin-select
           >
-            插件驱动 · 无内置音源
-          </motion.p>
+            {/* 刷新按钮 */}
+            {activePluginId && (
+              <button
+                type="button"
+                onClick={handleRefresh}
+                className="glass rounded-xl p-2 flex items-center justify-center hover:bg-surface-700/50 transition-colors"
+                title="刷新页面"
+              >
+                <RefreshCw className="w-4 h-4 text-surface-400" />
+              </button>
+            )}
+            
+            <button
+              type="button"
+              onClick={() => setShowPluginSelect(!showPluginSelect)}
+              className="glass rounded-xl px-3 py-2 flex items-center gap-2 text-left hover:bg-surface-700/50 transition-colors"
+            >
+              <Radio className="w-4 h-4 text-primary-400" />
+              <span className="text-sm text-surface-200 max-w-[120px] truncate">
+                {activePlugin?.meta.name || '选择源'}
+              </span>
+              <ChevronDown className={`w-4 h-4 text-surface-400 transition-transform ${showPluginSelect ? 'rotate-180' : ''}`} />
+            </button>
+            
+            <AnimatePresence>
+              {showPluginSelect && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -10, scale: 0.95 }}
+                  className="absolute z-[100] top-full right-0 mt-2 w-48 glass rounded-xl overflow-hidden max-h-64 overflow-y-auto"
+                >
+                  {readyPlugins.length === 0 ? (
+                    <div className="px-4 py-6 text-center text-surface-400 text-sm">
+                      暂无可用插件
+                    </div>
+                  ) : (
+                    readyPlugins.map((plugin) => (
+                      <button
+                        key={plugin.meta.id}
+                        type="button"
+                        onClick={() => {
+                          // 用户手动切换插件时强制刷新数据
+                          setActivePlugin(plugin.meta.id, true)
+                          setShowPluginSelect(false)
+                        }}
+                        className={`w-full px-4 py-3 flex items-center gap-3 text-left hover:bg-surface-700/50 transition-colors ${
+                          activePluginId === plugin.meta.id ? 'bg-primary-500/10' : ''
+                        }`}
+                      >
+                        <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                          activePluginId === plugin.meta.id ? 'bg-primary-400' : 'bg-surface-500'
+                        }`} />
+                        <span className="text-sm text-surface-200 truncate">{plugin.meta.name}</span>
+                      </button>
+                    ))
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </motion.div>
         </div>
       </header>
       
       {/* 主内容区 - 需要给底部导航留出空间 */}
-      <main className="flex-1 relative z-10 overflow-hidden pb-[76px]">
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={activeTab}
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            transition={{ duration: 0.2 }}
-            className="h-full overflow-hidden"
+      <main className="flex-1 relative z-10 overflow-hidden pb-[65px]">
+        <div className="h-full relative">
+          <div
+            className={`absolute inset-0 h-full overflow-hidden transition-opacity duration-200 ${
+              activeTab === 'search' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
+            }`}
           >
-            {activeTab === 'search' && <SearchView />}
-            {activeTab === 'playlist' && <PlaylistView />}
-            {activeTab === 'plugins' && <PluginManager />}
-          </motion.div>
-        </AnimatePresence>
+            <SearchView />
+          </div>
+          <div
+            className={`absolute inset-0 h-full overflow-hidden transition-opacity duration-200 ${
+              activeTab === 'playlist' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
+            }`}
+          >
+            <PlaylistView />
+          </div>
+          <div
+            className={`absolute inset-0 h-full overflow-hidden transition-opacity duration-200 ${
+              activeTab === 'plugins' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'
+            }`}
+          >
+            <PluginManager />
+          </div>
+        </div>
       </main>
       
       {/* 迷你播放器 - 固定在底部导航上方 */}
       <AnimatePresence>
         {currentTrack && !showPlayer && (
-          <MiniPlayer onExpand={() => setShowPlayer(true)} />
+          <MiniPlayer onExpand={() => setShowPlayer(true)} onRetry={handleRetry} />
         )}
       </AnimatePresence>
       
       {/* 底部导航 - 固定在底部 */}
-      <nav className="fixed bottom-0 left-0 right-0 z-30 px-4 pb-safe bg-gradient-to-t from-surface-950 via-surface-950/95 to-transparent pt-4">
-        <div className="glass rounded-2xl p-1.5 max-w-md mx-auto mb-2">
+      <nav className="fixed bottom-0 left-0 right-0 z-30 px-4 pb-safe bg-gradient-to-t from-surface-950 via-surface-950/95 to-transparent pt-3.5">
+        <div className="glass rounded-2xl p-1.5 max-w-2xl mx-auto w-full mb-2">
           <div className="flex">
             {tabs.map((tab) => {
               const isActive = activeTab === tab.id
@@ -558,13 +1309,13 @@ function App() {
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`flex-1 flex flex-col items-center gap-1 py-2.5 px-3 rounded-xl transition-all duration-200 ${
+                  className={`flex-1 flex flex-row items-center justify-center gap-2 py-2 px-3 rounded-xl transition-all duration-200 ${
                     isActive 
                       ? 'bg-primary-500/20 text-primary-400' 
                       : 'text-surface-400 hover:text-surface-200'
                   }`}
                 >
-                  <tab.icon className={`w-5 h-5 ${isActive ? 'drop-shadow-[0_0_8px_rgba(237,116,30,0.5)]' : ''}`} />
+                  <tab.icon className={`w-[18px] h-[18px] flex-shrink-0 ${isActive ? 'drop-shadow-[0_0_8px_rgba(237,116,30,0.5)]' : ''}`} />
                   <span className="text-[11px] font-medium">{tab.label}</span>
                 </button>
               )
@@ -576,7 +1327,7 @@ function App() {
       {/* 全屏播放器 */}
       <AnimatePresence>
         {showPlayer && (
-          <Player onClose={() => setShowPlayer(false)} onSeek={handleSeek} />
+          <Player onClose={() => setShowPlayer(false)} onSeek={handleSeek} onRetry={handleRetry} />
         )}
       </AnimatePresence>
     </div>

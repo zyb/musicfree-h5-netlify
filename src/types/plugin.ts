@@ -61,10 +61,24 @@ export type PluginPlaylist = {
   extra?: Record<string, unknown>
 }
 
+export type PluginTopListGroup = {
+  title: string
+  data: PluginPlaylist[]
+}
+
+export type PluginRecommendTag = {
+  id: string
+  title: string
+  raw?: unknown
+  [key: string]: unknown
+}
+
 export type PluginStream = {
   url: string
   mimeType?: string
   headers?: Record<string, string>
+  extra?: Record<string, unknown>
+  lrc?: string
 }
 
 export type SearchType = 'music' | 'artist' | 'album' | 'sheet'
@@ -89,6 +103,10 @@ export type MusicPlugin = {
   getAlbumSongs?(album: PluginAlbum): Promise<PluginTrack[]>
   getPlaylistSongs?(playlist: PluginPlaylist): Promise<PluginTrack[]>
   resolveStream?(track: PluginTrack): Promise<PluginStream>
+  getTopLists?(): Promise<PluginTopListGroup[]>
+  getTopListDetail?(playlist: PluginPlaylist): Promise<{ topListItem?: PluginPlaylist; musicList?: PluginTrack[] }>
+  getRecommendSheetTags?(): Promise<PluginRecommendTag[]>
+  getRecommendSheetsByTag?(tag: PluginRecommendTag | string, page?: number): Promise<SearchResult<PluginPlaylist>>
 }
 
 export type LoadedPlugin = {

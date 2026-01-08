@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { PluginTrack, PluginStream } from '../types/plugin'
-import type { LyricLine } from '../utils/lyricParser'
+import type { LyricLine } from '../lib/lyrics'
 
 export type PlayMode = 'sequence' | 'repeat' | 'shuffle' | 'single'
 
@@ -17,6 +17,9 @@ export interface PlayerState {
   muted: boolean
   playMode: PlayMode
   
+  // 歌词
+  lyrics: LyricLine[]
+  
   // 当前播放列表（来自歌单/专辑/歌手选择）
   playlist: PluginTrack[]
   playlistName: string
@@ -24,15 +27,11 @@ export interface PlayerState {
   // 播放历史
   playHistory: PluginTrack[]
   
-  // 歌词
-  lyrics: LyricLine[]
-  
   // 错误状态
   error: string | null
   
   // Actions
   setCurrentTrack: (track: PluginTrack | null) => void
-  updateCurrentTrackExtra: (extra: Record<string, unknown>) => void
   setCurrentStream: (stream: PluginStream | null) => void
   setIsPlaying: (playing: boolean) => void
   setIsLoading: (loading: boolean) => void
@@ -41,6 +40,7 @@ export interface PlayerState {
   setVolume: (volume: number) => void
   toggleMute: () => void
   setPlayMode: (mode: PlayMode) => void
+  setLyrics: (lyrics: LyricLine[]) => void
   
   // 播放列表操作
   setPlaylist: (tracks: PluginTrack[], name?: string) => void
@@ -55,9 +55,6 @@ export interface PlayerState {
   clearHistory: () => void
   
   setError: (error: string | null) => void
-  
-  // 歌词操作
-  setLyrics: (lyrics: LyricLine[]) => void
   
   // 播放控制
   playNext: () => PluginTrack | null
@@ -85,7 +82,8 @@ const getNextIndex = (
       return (currentIndex + 1) % total
     case 'sequence':
     default:
-      return currentIndex + 1 < total ? currentIndex + 1 : -1
+      // 顺序播放：到达最后一首时，循环到第一首
+      return (currentIndex + 1) % total
   }
 }
 
@@ -109,10 +107,10 @@ export const usePlayerStore = create<PlayerState>()(
       volume: 0.8,
       muted: false,
       playMode: 'sequence',
+      lyrics: [],
       playlist: [],
       playlistName: '播放列表',
       playHistory: [],
-      lyrics: [],
       error: null,
       
       setCurrentTrack: (track) => {
@@ -122,26 +120,7 @@ export const usePlayerStore = create<PlayerState>()(
         }
         set({ currentTrack: track, currentStream: null, error: null, currentTime: 0, duration: 0, lyrics: [] })
       },
-      updateCurrentTrackExtra: (extra) => {
-        console.log('[歌词调试] updateCurrentTrackExtra 被调用，extra:', extra)
-        set((state) => {
-          if (!state.currentTrack) {
-            console.log('[歌词调试] updateCurrentTrackExtra: currentTrack 为空')
-            return state
-          }
-          const newExtra = {
-            ...state.currentTrack.extra,
-            ...extra,
-          }
-          console.log('[歌词调试] updateCurrentTrackExtra: 更新后的 extra 包含 lrc:', !!newExtra?.lrc)
-          return {
-            currentTrack: {
-              ...state.currentTrack,
-              extra: newExtra,
-            },
-          }
-        })
-      },
+      setLyrics: (lyrics) => set({ lyrics }),
       setCurrentStream: (stream) => set({ currentStream: stream }),
       setIsPlaying: (playing) => set({ isPlaying: playing }),
       setIsLoading: (loading) => set({ isLoading: loading }),
@@ -198,8 +177,6 @@ export const usePlayerStore = create<PlayerState>()(
       
       setError: (error) => set({ error }),
       
-      setLyrics: (lyrics) => set({ lyrics }),
-      
       playNext: () => {
         const { playlist, currentTrack, playMode } = get()
         if (playlist.length === 0) return null
@@ -245,7 +222,20 @@ export const usePlayerStore = create<PlayerState>()(
         playHistory: state.playHistory,
         playlist: state.playlist,
         playlistName: state.playlistName,
+        // 保存当前播放的歌曲信息，但不保存播放状态
+        currentTrack: state.currentTrack,
+        currentStream: state.currentStream,
+        currentTime: state.currentTime,
+        duration: state.duration,
+        lyrics: state.lyrics,
       }),
+      // 恢复时，确保 isPlaying 为 false
+      onRehydrateStorage: () => (state) => {
+        if (state) {
+          state.isPlaying = false
+          state.isLoading = false
+        }
+      },
     }
   )
 )

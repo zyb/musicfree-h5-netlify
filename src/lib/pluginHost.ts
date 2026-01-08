@@ -5,11 +5,15 @@ import type {
   PluginDescriptor,
   PluginFeed,
   PluginTrack,
+  PluginPlaylist,
+  PluginRecommendTag,
 } from '../types/plugin'
+import CryptoJS from 'crypto-js'
+import bigInt from 'big-integer'
 
 const STORAGE_KEY = 'musicfree.h5.plugins'
-export const DEFAULT_PLUGIN_FEED =
-  'https://musicfreepluginshub.2020818.xyz/plugins.json'
+// 默认使用小秋音乐作为首选音乐源
+export const DEFAULT_PLUGIN_FEED = 'https://fastly.jsdelivr.net/gh/Huibq/keep-alive/Music_Free/xiaoqiu.js'
 
 // 全局调试日志系统
 export type DebugLogType = 'info' | 'success' | 'error' | 'request' | 'response'
@@ -46,27 +50,78 @@ const now = () => Date.now()
 const isHttps = (url: string) => /^https:\/\//i.test(url)
 const isRemoteUrl = (url: string) => /^https?:\/\//i.test(url)
 
-// HTTPS URL 的 CORS 代理
+// 检测是否为开发环境
+const isDevelopment = () => {
+  // 通过检查 hostname 判断是否为开发环境（localhost 或 127.0.0.1）
+  if (typeof window !== 'undefined' && window.location) {
+    const hostname = window.location.hostname
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname.startsWith('192.168.') || hostname.startsWith('10.')
+  }
+  return false
+}
+
+// 获取本地代理 URL（如果匹配 Vite 配置中的代理规则）
+const getLocalProxyUrl = (url: string): string | null => {
+  if (!isDevelopment()) return null
+  
+  try {
+    const urlObj = new URL(url)
+    const hostname = urlObj.hostname
+    const pathname = urlObj.pathname
+    
+    // 匹配 Vite 配置中的代理规则
+    if (hostname === 'music.haitangw.net') {
+      return `/proxy/haitangm${pathname}${urlObj.search}`
+    }
+    if (hostname === 'musicapi.haitangw.net') {
+      return `/proxy/haitang${pathname}${urlObj.search}`
+    }
+    if (hostname === 'raw.githubusercontent.com') {
+      return `/proxy/github${pathname}${urlObj.search}`
+    }
+    if (hostname === 'gitee.com') {
+      return `/proxy/gitee${pathname}${urlObj.search}`
+    }
+    // 可以添加更多匹配规则...
+  } catch {
+    // URL 解析失败，返回 null
+  }
+  
+  return null
+}
+
+// HTTPS URL 的 CORS 代理（按优先级排序）
 const httpsProxyCandidates: Array<(url: string) => string> = [
-  (url) => url,
+  (url) => url, // 先尝试直接请求
+  // 优先使用 codetabs（相对稳定）
+  (url) => `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`,
+  // allorigins 备用（有时不稳定）
   (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  // 其他备用代理
   (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
   (url) => `https://cors.isomorphic-git.org/${url}`,
-  (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
 ]
 
 // HTTP URL 的 CORS 代理（需要支持非 HTTPS 源）
 const httpProxyCandidates: Array<(url: string) => string> = [
+  // codetabs 支持 HTTP（注意：需要尾部斜杠）
+  (url) => `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`,
   // allorigins 支持 HTTP
   (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  // codetabs 支持 HTTP
-  (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
   // 直接请求（某些情况下可能成功）
   (url) => url,
 ]
 
 const defaultBuilders = (url: string) => {
   if (!isRemoteUrl(url)) return [(current: string) => current]
+  
+  // 在开发环境中，优先使用本地代理
+  const localProxy = getLocalProxyUrl(url)
+  if (localProxy) {
+    const candidates = isHttps(url) ? httpsProxyCandidates : httpProxyCandidates
+    return [(_: string) => localProxy, ...candidates]
+  }
+  
   return isHttps(url) ? httpsProxyCandidates : httpProxyCandidates
 }
 
@@ -108,9 +163,6 @@ const requestWithFallback = async <T>(
   throw new Error(errors.join('\n'))
 }
 
-const fetchJsonWithFallback = <T>(url: string, init?: RequestInit) =>
-  requestWithFallback<T>(url, async (response) => await response.json(), init)
-
 const fetchTextWithFallback = (url: string, init?: RequestInit) => {
   return requestWithFallback<string>(
     url,
@@ -138,14 +190,172 @@ export const persistPlugins = (plugins: InstalledPlugin[]) => {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(plugins))
 }
 
-export const fetchPluginFeed = async (
-  feedUrl: string,
-): Promise<PluginFeed> => {
+const extractPluginField = (code: string, field: string): string | undefined => {
+  // 先尝试简单的正则匹配（直接字符串值）
+  const pattern = new RegExp(`${field}\\s*:\\s*['"\`]([^'"\`]+)['"\`]`)
+  const match = code.match(pattern)
+  if (match?.[1]) {
+    return match[1]
+  }
+  
+  // 尝试匹配 module['exports'] 或 module.exports 中的字段（直接字符串值）
+  const modulePattern1 = new RegExp(
+    `module\\s*\\[?['"]exports['"]?\\]?\\s*=\\s*\\{[^}]*${field}\\s*:\\s*['"\`]([^'"\`]+)['"\`]`,
+    's'
+  )
+  const moduleMatch1 = code.match(modulePattern1)
+  if (moduleMatch1?.[1]) {
+    return moduleMatch1[1]
+  }
+  
+  // 尝试匹配混淆后的代码结构：module['exports']={'platform':_0x...,...}
+  // 这种情况下，值是通过函数调用生成的，需要执行代码才能获取
+  // 但我们可以尝试匹配整个 module.exports 对象定义
+  const modulePattern2 = new RegExp(
+    `module\\s*\\[?['"]exports['"]?\\]?\\s*=\\s*\\{([^}]+)\\}`,
+    's'
+  )
+  const moduleMatch2 = code.match(modulePattern2)
+  if (moduleMatch2?.[1]) {
+    // 在对象内容中查找字段
+    const fieldPattern = new RegExp(`${field}\\s*:\\s*['"\`]([^'"\`]+)['"\`]`)
+    const fieldMatch = moduleMatch2[1].match(fieldPattern)
+    if (fieldMatch?.[1]) {
+      return fieldMatch[1]
+    }
+  }
+  
+  return undefined
+}
+
+const buildSinglePluginDescriptor = (url: string, code?: string): PluginDescriptor => {
+  const fallbackName = decodeURIComponent(
+    url.split('/').pop()?.split('?')[0]?.replace(/\.\w+$/, '') || '自定义插件',
+  )
+  
+  let name = fallbackName
+  let version: string | undefined
+  let description: string | undefined
+  
+  if (code) {
+    // 尝试执行代码来获取 module.exports 中的字段
+    try {
+      // 创建一个安全的执行环境
+      const moduleExports: any = {}
+      const moduleObj: any = { exports: moduleExports }
+      
+      // 提供必要的 require shim
+      const requireShim = (_moduleName: string) => {
+        // 返回空对象，避免执行错误
+        return {}
+      }
+      
+      // 执行代码（在 try-catch 中，避免错误影响）
+      try {
+        // 使用 Function 构造函数来执行代码，避免污染全局作用域
+        // 注意：混淆的代码可能会访问全局变量，所以我们需要提供一些基本的全局变量
+        const func = new Function(
+          'module',
+          'exports',
+          'require',
+          code
+        )
+        
+        // 执行函数
+        func(moduleObj, moduleExports, requireShim)
+        
+        // 检查 module.exports 是否被设置（可能是通过 module['exports'] 设置的）
+        // 注意：混淆代码可能使用 module['exports'] 来设置，所以需要检查 moduleObj.exports
+        const finalExports = moduleObj.exports || moduleExports
+        
+        // 从 module.exports 中提取字段
+        if (finalExports && typeof finalExports === 'object') {
+          console.log('[PluginHost] 从 module.exports 提取字段:', {
+            platform: finalExports.platform,
+            name: finalExports.name,
+            version: finalExports.version,
+            description: finalExports.description,
+            allKeys: Object.keys(finalExports),
+          })
+          
+          if (finalExports.platform) {
+            name = String(finalExports.platform)
+            console.log('[PluginHost] 找到 platform:', name)
+          } else if (finalExports.name) {
+            name = String(finalExports.name)
+            console.log('[PluginHost] 找到 name:', name)
+          }
+          
+          if (finalExports.version) {
+            version = String(finalExports.version)
+          }
+          
+          if (finalExports.description) {
+            description = String(finalExports.description)
+          }
+        } else {
+          console.warn('[PluginHost] module.exports 不是对象:', finalExports)
+        }
+        
+        // 如果执行成功但没有获取到值，尝试正则表达式作为补充
+        if (name === fallbackName) {
+          const extractedName = extractPluginField(code, 'platform') || extractPluginField(code, 'name')
+          if (extractedName) {
+            name = extractedName
+            console.log('[PluginHost] 通过正则表达式提取到名称:', name)
+          }
+        }
+      } catch (execError: any) {
+        // 执行失败，回退到正则表达式提取
+        console.warn('[PluginHost] 执行插件代码失败，使用正则表达式提取:', execError?.message || execError)
+        const extractedName = extractPluginField(code, 'platform') || extractPluginField(code, 'name')
+        if (extractedName) {
+          name = extractedName
+        }
+        version = extractPluginField(code, 'version')
+        description = extractPluginField(code, 'description')
+      }
+    } catch (error: any) {
+      // 如果执行失败，使用正则表达式提取
+      console.warn('[PluginHost] 提取插件信息失败:', error?.message || error)
+      const extractedName = extractPluginField(code, 'platform') || extractPluginField(code, 'name')
+      if (extractedName) {
+        name = extractedName
+      }
+      version = extractPluginField(code, 'version')
+      description = extractPluginField(code, 'description')
+    }
+  }
+
+  return {
+    name,
+    url,
+    version,
+    description,
+  }
+}
+
+export const fetchPluginFeed = async (feedUrl: string): Promise<PluginFeed> => {
   try {
-    const json = await fetchJsonWithFallback<PluginFeed>(feedUrl, {
+    const rawText = await fetchTextWithFallback(feedUrl, {
       cache: 'no-store',
     })
-    return { ...json, source: 'remote' }
+
+    try {
+      const json = JSON.parse(rawText) as PluginFeed
+      if (json?.plugins?.length) {
+        return { ...json, source: 'remote' }
+      }
+    } catch {
+      // 不是标准 JSON，继续尝试按插件脚本解析
+    }
+
+    const descriptor = buildSinglePluginDescriptor(feedUrl, rawText)
+    return {
+      desc: `自定义插件：${descriptor.name}`,
+      plugins: [descriptor],
+      source: 'remote',
+    }
   } catch (error) {
     console.warn('plugin feed remote fetch failed, fallback to local', error)
     const fallback = await fetchLocalFeed()
@@ -191,130 +401,197 @@ type PluginHostContext = {
   descriptor: InstalledPlugin
 }
 
-// 检测是否为生产环境 (Netlify)
-const isProduction = (import.meta as unknown as { env: { PROD: boolean } }).env.PROD
-const PROXY_PREFIX = isProduction ? '/api/proxy' : '/proxy'
-
 // URL 重写规则 - 将外部 URL 映射到本地代理
+// 只保留支持的音乐源所需的代理：
+// - 小秋/小蜗/小芸/小枸音乐 (使用 JSDelivr/GitHub，走 CORS 代理或直连)
+// 支持的音乐源代理配置：
+// - 小秋音乐 (QQ 音乐 API)
+// - 小蜗音乐 (酷我音乐 API)
+// - 小芸音乐 (网易云音乐 API)
+// - 小枸音乐 (酷狗音乐 API)
+// - bilibili (B站 API)
+// - 元力QQ (QQ 音乐 API + 海棠音乐 API)
 const urlRewriteRules: Array<{ pattern: RegExp; replace: string }> = [
-  // ============ QQ 音乐 ============
-  { pattern: /^https?:\/\/u\.y\.qq\.com\//, replace: '/proxy/qqu/' },
-  { pattern: /^https?:\/\/c\.y\.qq\.com\//, replace: '/proxy/qqc/' },
-  { pattern: /^https?:\/\/i\.y\.qq\.com\//, replace: '/proxy/qqi/' },
-  { pattern: /^https?:\/\/shc\.y\.qq\.com\//, replace: '/proxy/qqshc/' },
+  // ============ QQ 音乐 API (小秋、元力QQ) ============
+  { pattern: /^https?:\/\/c\.y\.qq\.com\//, replace: '/api/proxy/qqmusic_c/' },
+  { pattern: /^https?:\/\/u\.y\.qq\.com\//, replace: '/api/proxy/qqmusic_u/' },
+  { pattern: /^https?:\/\/i\.y\.qq\.com\//, replace: '/api/proxy/qqmusic_i/' },
   
-  // ============ 网易云音乐 ============
-  { pattern: /^https?:\/\/interface3\.music\.163\.com\//, replace: '/proxy/neteasem/' },
-  { pattern: /^https?:\/\/interface\.music\.163\.com\//, replace: '/proxy/neteaseapi/' },
-  { pattern: /^https?:\/\/music\.163\.com\//, replace: '/proxy/netease/' },
-  { pattern: /^https?:\/\/share\.duanx\.cn\//, replace: '/proxy/duanx/' },
-  { pattern: /^https?:\/\/music\.haitangw\.cc\//, replace: '/proxy/haitangcc/' },
-  { pattern: /^https?:\/\/lxmusicapi\.onrender\.com\//, replace: '/proxy/lxmusic/' },
+  // ============ 酷我音乐 API (小蜗、网易音乐灰色歌曲) ============
+  { pattern: /^https?:\/\/search\.kuwo\.cn\//, replace: '/api/proxy/kuwo_search/' },
+  { pattern: /^https?:\/\/m\.kuwo\.cn\//, replace: '/api/proxy/kuwo_m/' },
+  { pattern: /^https?:\/\/wapi\.kuwo\.cn\//, replace: '/api/proxy/kuwo_wapi/' },
+  { pattern: /^https?:\/\/kbangserver\.kuwo\.cn\//, replace: '/api/proxy/kuwo_kbang/' },
+  { pattern: /^https?:\/\/nplserver\.kuwo\.cn\//, replace: '/api/proxy/kuwo_npl/' },
+  { pattern: /^https?:\/\/mobileinterfaces\.kuwo\.cn\//, replace: '/api/proxy/kuwo_mobile/' },
+  { pattern: /^https?:\/\/nmobi\.kuwo\.cn\//, replace: '/api/proxy/kuwo_nmobi/' },
   
-  // ============ 酷狗音乐 ============
-  { pattern: /^https?:\/\/songsearch\.kugou\.com\//, replace: '/proxy/kugousearch/' },
-  { pattern: /^https?:\/\/complexsearch\.kugou\.com\//, replace: '/proxy/kugoucomplex/' },
-  { pattern: /^https?:\/\/wwwapi\.kugou\.com\//, replace: '/proxy/kugouwww/' },
-  { pattern: /^https?:\/\/gateway\.kugou\.com\//, replace: '/proxy/kugougateway/' },
-  { pattern: /^https?:\/\/trackercdnbj\.kugou\.com\//, replace: '/proxy/kugoutracker/' },
-  { pattern: /^https?:\/\/mobilecdn\.kugou\.com\//, replace: '/proxy/kugoumobile/' },
-  { pattern: /^https?:\/\/mobileservice\.kugou\.com\//, replace: '/proxy/kugouservice/' },
-  { pattern: /^https?:\/\/www\.kugou\.com\//, replace: '/proxy/kugou/' },
-  { pattern: /^https?:\/\/5singfc\.kugou\.com\//, replace: '/proxy/5singfc/' },
-  { pattern: /^https?:\/\/5sing\.kugou\.com\//, replace: '/proxy/5sing/' },
+  // ============ 网易云音乐 API (小芸、网易音乐) ============
+  { pattern: /^https?:\/\/interface3\.music\.163\.com\//, replace: '/api/proxy/netease_interface3/' },
+  { pattern: /^https?:\/\/interface\.music\.163\.com\//, replace: '/api/proxy/netease_interface/' },
+  { pattern: /^https?:\/\/y\.music\.163\.com\//, replace: '/api/proxy/netease_y/' },
+  { pattern: /^https?:\/\/music\.163\.com\//, replace: '/api/proxy/netease/' },
   
-  // ============ 酷我音乐 ============
-  { pattern: /^https?:\/\/search\.kuwo\.cn\//, replace: '/proxy/kuwosearch/' },
-  { pattern: /^https?:\/\/www\.kuwo\.cn\//, replace: '/proxy/kuwo/' },
-  { pattern: /^https?:\/\/kuwo\.cn\//, replace: '/proxy/kuwoapi/' },
-  
-  // ============ 咪咕音乐 ============
-  { pattern: /^https?:\/\/m\.music\.migu\.cn\//, replace: '/proxy/migum/' },
-  { pattern: /^https?:\/\/app\.c\.nf\.migu\.cn\//, replace: '/proxy/miguapp/' },
-  { pattern: /^https?:\/\/c\.musicapp\.migu\.cn\//, replace: '/proxy/migucdn/' },
-  { pattern: /^https?:\/\/jadeite\.migu\.cn\//, replace: '/proxy/migupdms/' },
-  { pattern: /^https?:\/\/music\.migu\.cn\//, replace: '/proxy/migu/' },
+  // ============ 酷狗音乐 API (小枸) ============
+  { pattern: /^https?:\/\/msearch\.kugou\.com\//, replace: '/api/proxy/kugou_search/' },
+  { pattern: /^https?:\/\/mobilecdn\.kugou\.com\//, replace: '/api/proxy/kugou_mobilecdn/' },
+  { pattern: /^https?:\/\/mobilecdnbj\.kugou\.com\//, replace: '/api/proxy/kugou_mobilecdnbj/' },
+  { pattern: /^https?:\/\/lyrics\.kugou\.com\//, replace: '/api/proxy/kugou_lyrics/' },
+  { pattern: /^https?:\/\/t\.kugou\.com\//, replace: '/api/proxy/kugou_t/' },
+  { pattern: /^https?:\/\/www2\.kugou\.kugou\.com\//, replace: '/api/proxy/kugou_www2/' },
+  { pattern: /^https?:\/\/gateway\.kugou\.com\//, replace: '/api/proxy/kugou_gateway/' },
+  { pattern: /^https?:\/\/songsearch\.kugou\.com\//, replace: '/api/proxy/kugou_songsearch/' },
   
   // ============ B站 ============
-  { pattern: /^https?:\/\/api\.bilibili\.com\//, replace: '/proxy/biliapi/' },
-  { pattern: /^https?:\/\/www\.bilibili\.com\//, replace: '/proxy/bili/' },
+  { pattern: /^https?:\/\/api\.bilibili\.com\//, replace: '/api/proxy/biliapi/' },
+  { pattern: /^https?:\/\/www\.bilibili\.com\//, replace: '/api/proxy/bili/' },
   
-  // ============ 千千音乐 ============
-  { pattern: /^https?:\/\/music\.91q\.com\//, replace: '/proxy/qianqian/' },
+  // ============ 海棠音乐 (元力QQ) ============
+  { pattern: /^https?:\/\/musicapi\.haitangw\.net\//, replace: '/api/proxy/haitang/' },
+  { pattern: /^https?:\/\/music\.haitangw\.net\//, replace: '/api/proxy/haitangm/' },
   
-  // ============ 喜马拉雅 ============
-  { pattern: /^https?:\/\/mobile\.ximalaya\.com\//, replace: '/proxy/xmlymobile/' },
-  { pattern: /^https?:\/\/www\.ximalaya\.com\//, replace: '/proxy/xmly/' },
+  // ============ LX Music API (获取播放URL) ============
+  { pattern: /^https?:\/\/lxmusicapi\.onrender\.com\//, replace: '/api/proxy/lxmusic/' },
   
-  // ============ 懒人听书 ============
-  { pattern: /^https?:\/\/www\.lrts\.me\//, replace: '/proxy/lrts/' },
+  // ============ ikun 音源 API ============
+  { pattern: /^https?:\/\/api\.ikunshare\.com\//, replace: '/api/proxy/ikun/' },
   
-  // ============ 猫耳 FM ============
-  { pattern: /^https?:\/\/www\.missevan\.com\//, replace: '/proxy/missevan/' },
+  // ============ 海棠音乐 (haitangw.cc) ============
+  { pattern: /^https?:\/\/music\.haitangw\.cc\//, replace: '/api/proxy/haitangcc/' },
   
-  // ============ 荔枝 FM ============
-  { pattern: /^https?:\/\/www\.lizhi\.fm\//, replace: '/proxy/lizhi/' },
+  // ============ 段兄音乐 API (元力WY) ============
+  { pattern: /^https?:\/\/share\.duanx\.cn\//, replace: '/api/proxy/duanx/' },
   
-  // ============ zz123 聚合 ============
-  { pattern: /^https?:\/\/(www\.)?zz123\.com\//, replace: '/proxy/zz123/' },
-  { pattern: /^https?:\/\/(www\.)?zz123\.com\?/, replace: '/proxy/zz123?' },
-  { pattern: /^https?:\/\/(www\.)?zz123\.com$/, replace: '/proxy/zz123' },
+  // ============ 咪咕音乐 API ============
+  { pattern: /^https?:\/\/m\.music\.migu\.cn\//, replace: '/api/proxy/migu_m/' },
+  { pattern: /^https?:\/\/music\.migu\.cn\//, replace: '/api/proxy/migu/' },
+  { pattern: /^https?:\/\/cdnmusic\.migu\.cn\//, replace: '/api/proxy/migu_cdn/' },
   
-  // ============ 歌曲宝 ============
-  { pattern: /^https?:\/\/(www\.)?gequbao\.com\//, replace: '/proxy/gequbao/' },
-  { pattern: /^https?:\/\/(www\.)?gequbao\.com\?/, replace: '/proxy/gequbao?' },
-  { pattern: /^https?:\/\/(www\.)?gequbao\.com$/, replace: '/proxy/gequbao' },
+  // ============ 插件托管 (kstore.vip) ============
+  { pattern: /^https?:\/\/13413\.kstore\.vip\//, replace: '/api/proxy/kstore/' },
   
-  // ============ Suno ============
-  { pattern: /^https?:\/\/studio-api\.suno\.ai\//, replace: '/proxy/suno/' },
-  { pattern: /^https?:\/\/suno\.ai\//, replace: '/proxy/suno/' },
-  
-  // ============ Gitee ============
-  { pattern: /^https?:\/\/gitee\.com\//, replace: '/proxy/gitee/' },
-  
-  // ============ GitHub ============
-  { pattern: /^https?:\/\/raw\.githubusercontent\.com\//, replace: '/proxy/github/' },
-  { pattern: /^https?:\/\/ghproxy\.com\//, replace: '/proxy/ghproxy/' },
-  
-  // ============ 海棠音乐 ============
-  { pattern: /^https?:\/\/musicapi\.haitangw\.net\//, replace: '/proxy/haitang/' },
-  { pattern: /^https?:\/\/music\.haitangw\.net\//, replace: '/proxy/haitangm/' },
-  
-  // ============ 其他聚合 API ============
-  { pattern: /^https?:\/\/api\.lolimi\.cn\//, replace: '/proxy/aggregator/' },
-  { pattern: /^https?:\/\/api\.xingzhige\.com\//, replace: '/proxy/myfreemp3/' },
+  // ============ 插件加载 ============
+  { pattern: /^https?:\/\/gitee\.com\//, replace: '/api/proxy/gitee/' },
+  { pattern: /^https?:\/\/raw\.githubusercontent\.com\//, replace: '/api/proxy/github/' },
+  { pattern: /^https?:\/\/fastly\.jsdelivr\.net\//, replace: '/api/proxy/jsdelivr/' },
 ]
 
-// 重写 URL 使用本地代理
+// 重写 URL 使用代理（开发环境使用本地代理，生产环境使用 API 代理）
 const rewriteUrl = (url: string): string | null => {
   for (const rule of urlRewriteRules) {
     if (rule.pattern.test(url)) {
-      // 根据环境替换代理前缀
-      const replacement = rule.replace.replace('/proxy/', `${PROXY_PREFIX}/`)
-      return url.replace(rule.pattern, replacement)
+      return url.replace(rule.pattern, rule.replace)
     }
   }
   return null
 }
 
+// 从重写的 URL 中提取原始 URL（用于回退）
+const extractOriginalUrl = (rewrittenUrl: string): string | null => {
+  // 匹配 /api/proxy/[type]/... 格式
+  const match = rewrittenUrl.match(/^\/api\/proxy\/([^/]+)\/(.+)$/)
+  if (!match) {
+    // 尝试匹配带查询参数的格式
+    const matchWithQuery = rewrittenUrl.match(/^\/api\/proxy\/([^/]+)\/(.+)\?(.+)$/)
+    if (matchWithQuery) {
+      const [, proxyType, path, query] = matchWithQuery
+      return extractOriginalUrlByType(proxyType, path, query)
+    }
+    return null
+  }
+  
+  const [, proxyType, pathWithQuery] = match
+  const [path, query] = pathWithQuery.includes('?') 
+    ? pathWithQuery.split('?', 2)
+    : [pathWithQuery, '']
+  
+  return extractOriginalUrlByType(proxyType, path, query)
+}
+
+// 根据代理类型提取原始 URL
+// 支持的音乐源代理映射
+const extractOriginalUrlByType = (proxyType: string, path: string, query: string): string | null => {
+  const proxyTargets: Record<string, string> = {
+    // QQ 音乐 (小秋、元力QQ)
+    qqmusic_c: 'https://c.y.qq.com',
+    qqmusic_u: 'https://u.y.qq.com',
+    qqmusic_i: 'http://i.y.qq.com',
+    // 酷我音乐 (小蜗、网易音乐灰色歌曲)
+    kuwo_search: 'http://search.kuwo.cn',
+    kuwo_m: 'http://m.kuwo.cn',
+    kuwo_wapi: 'http://wapi.kuwo.cn',
+    kuwo_kbang: 'http://kbangserver.kuwo.cn',
+    kuwo_npl: 'http://nplserver.kuwo.cn',
+    kuwo_mobile: 'http://mobileinterfaces.kuwo.cn',
+    kuwo_nmobi: 'http://nmobi.kuwo.cn',
+    // 网易云音乐 (小芸、网易音乐)
+    netease: 'https://music.163.com',
+    netease_interface: 'https://interface.music.163.com',
+    netease_interface3: 'https://interface3.music.163.com',
+    netease_y: 'https://y.music.163.com',
+    // 酷狗音乐 (小枸)
+    kugou_search: 'http://msearch.kugou.com',
+    kugou_mobilecdn: 'http://mobilecdn.kugou.com',
+    kugou_mobilecdnbj: 'http://mobilecdnbj.kugou.com',
+    kugou_lyrics: 'http://lyrics.kugou.com',
+    kugou_t: 'http://t.kugou.com',
+    kugou_www2: 'http://www2.kugou.kugou.com',
+    kugou_gateway: 'https://gateway.kugou.com',
+    kugou_songsearch: 'https://songsearch.kugou.com',
+    // B站
+    biliapi: 'https://api.bilibili.com',
+    bili: 'https://www.bilibili.com',
+    // 海棠音乐 (元力QQ)
+    haitang: 'http://musicapi.haitangw.net',
+    haitangm: 'http://music.haitangw.net',
+    // LX Music API (获取播放URL)
+    lxmusic: 'https://lxmusicapi.onrender.com',
+    // ikun 音源 API
+    ikun: 'https://api.ikunshare.com',
+    // 海棠音乐 (haitangw.cc)
+    haitangcc: 'https://music.haitangw.cc',
+    // 段兄音乐 API (元力WY)
+    duanx: 'https://share.duanx.cn',
+    // 咪咕音乐
+    migu_m: 'https://m.music.migu.cn',
+    migu: 'https://music.migu.cn',
+    migu_cdn: 'https://cdnmusic.migu.cn',
+    // 插件托管
+    kstore: 'https://13413.kstore.vip',
+    // 插件加载
+    gitee: 'https://gitee.com',
+    github: 'https://raw.githubusercontent.com',
+    jsdelivr: 'https://fastly.jsdelivr.net',
+  }
+  
+  const target = proxyTargets[proxyType]
+  if (!target) return null
+  
+  const queryString = query ? `?${query}` : ''
+  return `${target}/${path}${queryString}`
+}
+
 /**
  * 代理媒体 URL（用于 audio/video 元素）
  * 将外部 URL 转换为本地代理 URL
+ * 注意：媒体资源（图片、音频）一般不需要代理，直接访问即可
  */
 export const proxyMediaUrl = (url: string): string => {
   if (!url) return url
-  // 如果已经是相对路径或 data URL，直接返回
-  if (url.startsWith('/') || url.startsWith('data:') || url.startsWith('blob:')) {
-    return url
-  }
-  // 尝试重写为代理 URL
-  const rewritten = rewriteUrl(url)
-  if (rewritten) {
-    console.log('[Media] 代理 URL:', url.substring(0, 50), '->', rewritten.substring(0, 40))
-    return rewritten
-  }
-  // 无匹配规则，返回原 URL
+  // 直接返回原 URL，不做任何代理处理
   return url
+}
+
+/**
+ * 检测是否是需要 MSE 播放的音频格式（如 B站的 m4s 格式）
+ */
+export const isMSERequiredAudio = (url: string): boolean => {
+  if (!url) return false
+  // B站 DASH 音频流（m4s 格式）
+  if (url.includes('.m4s')) {
+    return true
+  }
+  return false
 }
 
 // 创建带代理的 fetch 函数
@@ -326,50 +603,120 @@ const createProxiedFetch = (): typeof fetch => {
       return fetch(input, init)
     }
     
-    // 首先尝试使用本地代理（开发环境）
+    // 首先尝试使用代理（开发环境使用本地代理，生产环境使用 API 代理）
     const rewrittenUrl = rewriteUrl(url)
     if (rewrittenUrl) {
       try {
-        console.log('[Proxy] 本地代理:', url.substring(0, 60), '->', rewrittenUrl.substring(0, 40))
+        if (isDevelopment()) {
+          console.log('[Proxy] 本地代理:', url.substring(0, 60), '->', rewrittenUrl.substring(0, 40))
+        } else {
+          console.log('[Proxy] API 代理:', url.substring(0, 60), '->', rewrittenUrl.substring(0, 40))
+        }
         const response = await fetch(rewrittenUrl, init)
         if (response.ok) {
-          return response
+          // 检查响应 Content-Type，如果是 HTML 说明 serverless function 没有工作
+          const contentType = response.headers.get('content-type') || ''
+          if (contentType.includes('text/html')) {
+            console.warn('[Proxy] API 代理返回 HTML (Content-Type: text/html)，说明 serverless function 未工作，回退到 CORS 代理')
+            // 不返回 response，继续执行下面的 CORS 代理代码
+            // 注意：这里不能读取 response.text()，因为 Response 只能读取一次
+          } else {
+            // 返回有效的响应
+            return response
+          }
+        } else {
+          console.warn('[Proxy] 代理返回:', response.status)
         }
-        console.warn('[Proxy] 本地代理返回:', response.status)
       } catch (e) {
-        console.warn('[Proxy] 本地代理异常:', e)
+        console.warn('[Proxy] 代理异常:', e)
+        // 如果代理失败，继续尝试 CORS 代理
       }
     }
     
-    // 对于 GET 请求，尝试 CORS 代理
+    // 尝试 CORS 代理
     const method = init?.method?.toUpperCase() || 'GET'
+    
+    // 对于 GET 请求，优先尝试代理
     if (method === 'GET') {
-      // 尝试 allorigins 代理
+      // 优先尝试 codetabs（相对稳定）
+      try {
+        const codetabsUrl = `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`
+        console.log('[Proxy] codetabs:', url.substring(0, 50))
+        const response = await fetch(codetabsUrl, {
+          signal: init?.signal,
+        })
+        if (response.ok) {
+          console.log('[Proxy] codetabs 成功')
+          return response
+        }
+        console.warn('[Proxy] codetabs 返回:', response.status)
+      } catch (e) {
+        console.warn('[Proxy] codetabs 异常:', e)
+      }
+      
+      // 尝试 allorigins 代理（备用）
       try {
         const alloriginsUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
         console.log('[Proxy] allorigins:', url.substring(0, 50))
-        const response = await fetch(alloriginsUrl)
+        const response = await fetch(alloriginsUrl, {
+          signal: init?.signal,
+        })
         if (response.ok) {
+          console.log('[Proxy] allorigins 成功')
           return response
         }
-      } catch {
-        // 继续尝试其他代理
+        console.warn('[Proxy] allorigins 返回:', response.status)
+      } catch (e) {
+        console.warn('[Proxy] allorigins 异常:', e)
       }
       
       // 尝试其他 CORS 代理
       const candidates = isHttps(url) ? httpsProxyCandidates : httpProxyCandidates
       for (const builder of candidates) {
         const proxiedUrl = builder(url)
-        if (proxiedUrl === url) continue
+        if (proxiedUrl === url) continue // 跳过直接请求（最后尝试）
         try {
-          const response = await fetch(proxiedUrl)
+          console.log('[Proxy] 尝试代理:', proxiedUrl.substring(0, 60))
+          const response = await fetch(proxiedUrl, {
+            signal: init?.signal,
+          })
           if (response.ok) {
+            console.log('[Proxy] 代理成功')
             return response
           }
-        } catch {
+        } catch (e) {
+          console.warn('[Proxy] 代理异常:', e)
           continue
         }
       }
+    } else {
+      // 对于 POST/PUT/DELETE 等非 GET 请求
+      // 大部分公共 CORS 代理不支持 POST，但我们可以尝试一些方法
+      console.log('[Proxy] 非 GET 请求 (', method, ')，尝试代理')
+      
+      // 尝试 codetabs（可能支持 POST）
+      try {
+        const codetabsUrl = `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`
+        console.log('[Proxy] codetabs POST:', url.substring(0, 50))
+        const response = await fetch(codetabsUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Target-URL': url,
+            ...(init?.headers as Record<string, string> || {}),
+          },
+          body: init?.body,
+          signal: init?.signal,
+        })
+        if (response.ok) {
+          console.log('[Proxy] codetabs POST 成功')
+          return response
+        }
+      } catch (e) {
+        console.warn('[Proxy] codetabs POST 异常:', e)
+      }
+      
+      console.warn('[Proxy] POST 请求无法通过 CORS 代理，将直接请求（可能 CORS 错误）')
     }
     
     // 最后尝试直接请求（可能会 CORS 错误）
@@ -407,18 +754,8 @@ const createHostApi = (
   console: createPluginConsole(descriptor.name),
 })
 
-// 全局歌词缓存：key 是歌曲 ID，value 是歌词文本
+// 歌词缓存：key 是歌曲 ID，value 是歌词文本（全局共享，用于在 axios 响应和 resolveStream 之间传递歌词）
 const lyricCache = new Map<string, string>()
-
-// 获取歌词缓存的函数（供外部调用）
-export const getLyricFromCache = (trackId: string): string | undefined => {
-  return lyricCache.get(trackId)
-}
-
-// 导出 lyricCache 供调试使用（仅在开发环境）
-if (typeof window !== 'undefined') {
-  (window as any).lyricCache = lyricCache
-}
 
 // 创建 axios 兼容的模拟实现
 const createAxiosShim = (_proxiedFetch: typeof fetch) => {
@@ -427,38 +764,116 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
     let data: unknown
     
     const text = await response.text()
-    if (contentType.includes('application/json') || text.startsWith('{') || text.startsWith('[')) {
-      try {
-        data = JSON.parse(text)
-      } catch {
+    
+    // 检查是否是 HTML 错误页面
+    if (text.trim().startsWith('<!doctype') || text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
+      console.error('[axios] 收到 HTML 错误页面:', requestUrl?.substring(0, 80), '状态码:', response.status, '内容预览:', text.substring(0, 200))
+      throw new Error(`Received HTML error page instead of JSON. Status: ${response.status}, URL: ${requestUrl}`)
+    }
+    
+    // 某些插件代码（如 importMusicSheet）期望原始 JSONP 字符串，可以调用 .replace() 方法
+    // 对于这些 API，我们需要保留原始 JSONP 字符串
+    const needsRawJsonp = requestUrl && (
+      requestUrl.includes('fcg_ucc_getcdinfo_byids_cp.fcg') || // importMusicSheet 需要原始 JSONP
+      requestUrl.includes('fcg_get_diss_by_tag.fcg') // getRecommendSheetsByTag 可能需要原始 JSONP
+    )
+    
+    if (needsRawJsonp) {
+      // 对于需要原始 JSONP 的 API，保留原始文本
+      console.log('[axios] 保留原始 JSONP 文本用于插件处理:', requestUrl?.substring(0, 80))
+      data = text
+    } else {
+      // 先尝试解析 JSONP 响应
+      let jsonpMatch = text.match(/^[a-zA-Z_$][a-zA-Z0-9_$]*\s*\(\s*({[\s\S]*})\s*\)\s*;?\s*$/)
+      if (!jsonpMatch) {
+        // 尝试匹配常见的 JSONP callback 函数名
+        jsonpMatch = text.match(/(?:MusicJsonCallback|jsonpGetTagListCallback|jsonpGetPlaylistCallback|jsonCallback)\s*\(\s*({[\s\S]*})\s*\)/s)
+      }
+      
+      if (jsonpMatch) {
+        try {
+          const jsonStr = jsonpMatch[1]
+          data = JSON.parse(jsonStr)
+          
+          // 检查是否是 invalid referer 错误（code: 0, subcode: 1）
+          if (typeof data === 'object' && data !== null && 'code' in data && 'subcode' in data && 'msg' in data) {
+            const errorData = data as { code: number; subcode: number; msg: string }
+            if (errorData.code === 0 && errorData.subcode === 1 && errorData.msg.includes('invalid referer')) {
+              console.error('[axios] 检测到 invalid referer 错误，CORS 代理无法传递 Referer header:', requestUrl?.substring(0, 80))
+              // 创建一个特殊错误，标记需要 Referer
+              const error = new Error(`Invalid referer error: CORS proxy cannot forward Referer header. URL: ${requestUrl}`) as Error & { needsReferer?: boolean; originalUrl?: string }
+              error.needsReferer = true
+              error.originalUrl = requestUrl
+              throw error
+            }
+          }
+          
+          console.log('[axios] 检测到 JSONP 响应，已解析:', requestUrl?.substring(0, 80), '数据预览:', JSON.stringify(data).substring(0, 200))
+        } catch (e) {
+          if (e instanceof Error && (e.message.includes('Invalid referer') || (e as Error & { needsReferer?: boolean }).needsReferer)) {
+            throw e // 重新抛出 invalid referer 错误
+          }
+          console.warn('[axios] JSONP 解析失败:', e, '原始文本前500字符:', text.substring(0, 500))
+          // 如果 JSONP 解析失败，尝试直接解析 JSON
+          try {
+            data = JSON.parse(text)
+          } catch (e2) {
+            data = text
+          }
+        }
+      } else if (text.includes('"code":101') || text.includes('"code":-2') || text.includes('parameters wrong') || text.includes('parameter failed')) {
+        console.warn('[axios] 检测到 API 错误响应，可能需要 Referer header:', text.substring(0, 200))
+        // 返回错误对象，让调用方处理
+        try {
+          const errorData = JSON.parse(text.replace(/^[a-zA-Z_$][a-zA-Z0-9_$]*\s*\(|\)\s*;?\s*$/g, ''))
+          data = errorData
+        } catch {
+          data = { code: 101, message: 'parameters wrong', rawText: text }
+        }
+      } else if (contentType.includes('application/json') || text.startsWith('{') || text.startsWith('[')) {
+        try {
+          data = JSON.parse(text)
+          // 检查是否是 invalid referer 错误
+          if (typeof data === 'object' && data !== null && 'code' in data && 'subcode' in data && 'msg' in data) {
+            const errorData = data as { code: number; subcode: number; msg: string }
+            if (errorData.code === 0 && errorData.subcode === 1 && errorData.msg.includes('invalid referer')) {
+              console.error('[axios] 检测到 invalid referer 错误（JSON格式）:', requestUrl?.substring(0, 80))
+              const error = new Error(`Invalid referer error: CORS proxy cannot forward Referer header. URL: ${requestUrl}`) as Error & { needsReferer?: boolean; originalUrl?: string }
+              error.needsReferer = true
+              error.originalUrl = requestUrl
+              throw error
+            }
+          }
+        } catch (e) {
+          if (e instanceof Error && (e.message.includes('Invalid referer') || (e as Error & { needsReferer?: boolean }).needsReferer)) {
+            throw e
+          }
+          data = text
+        }
+      } else {
         data = text
       }
-    } else {
-      data = text
     }
     
     // 拦截 qq_song_kw.php 请求，提取歌词
-    if (requestUrl && requestUrl.includes('qq_song_kw.php')) {
-      console.log('[歌词调试] 检测到 qq_song_kw.php 请求，检查响应数据')
-      console.log('[歌词调试] 请求 URL:', requestUrl)
+    if (requestUrl && (requestUrl.includes('qq_song_kw.php') || requestUrl.includes('qq_song'))) {
+      console.log('[Lyrics] 检测到 qq_song_kw.php 请求，检查响应数据')
+      console.log('[Lyrics] 请求 URL:', requestUrl)
+      console.log('[Lyrics] 响应数据:', JSON.stringify(data).substring(0, 500))
       
       // 从 URL 中提取 id 参数
       let urlId: string | undefined
       try {
         const urlObj = new URL(requestUrl, 'http://dummy.com')
         urlId = urlObj.searchParams.get('id') || undefined
-        console.log('[歌词调试] 从 URL 中提取的 id:', urlId)
       } catch (e) {
-        // 如果 URL 解析失败，尝试手动提取
         const match = requestUrl.match(/[?&]id=([^&]+)/)
         if (match) {
           urlId = match[1]
-          console.log('[歌词调试] 从 URL 中手动提取的 id:', urlId)
         }
       }
       
-      console.log('[歌词调试] 响应数据类型:', typeof data, '是否为对象:', typeof data === 'object', '是否有 data 字段:', data && typeof data === 'object' && 'data' in data)
-      
+      // 检查响应数据格式
       if (data && typeof data === 'object' && 'data' in data) {
         const responseData = data as { 
           code?: number
@@ -466,53 +881,29 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
           data?: { 
             lrc?: string
             rid?: string
-            name?: string
-            artist?: string
+            url?: string
             [key: string]: unknown 
           } 
         }
-        
-        console.log('[歌词调试] 响应数据结构:', {
-          code: responseData.code,
-          msg: responseData.msg,
-          hasData: !!responseData.data,
-          dataKeys: responseData.data ? Object.keys(responseData.data) : [],
-          hasLrc: !!responseData.data?.lrc,
-          lrcType: typeof responseData.data?.lrc,
-          lrcLength: typeof responseData.data?.lrc === 'string' ? responseData.data.lrc.length : 0,
-          rid: responseData.data?.rid,
-        })
         
         if (responseData.data?.lrc && typeof responseData.data.lrc === 'string') {
           // 优先使用响应中的 rid，如果没有则使用 URL 中的 id
           const trackId = responseData.data.rid || urlId || ''
           if (trackId) {
-            console.log('[歌词调试] 从 qq_song_kw.php 响应中提取到歌词，trackId:', trackId, '歌词长度:', responseData.data.lrc.length, '歌词预览:', responseData.data.lrc.substring(0, 100))
+            console.log('[Lyrics] ✓ 从 qq_song_kw.php 响应中提取到歌词，trackId:', trackId, '歌词长度:', responseData.data.lrc.length)
             // 使用多个 key 保存歌词，确保能找到
             lyricCache.set(String(trackId), responseData.data.lrc)
             if (urlId && urlId !== trackId) {
               lyricCache.set(String(urlId), responseData.data.lrc)
             }
-            // 触发全局事件，通知 App.tsx 更新歌词
-            if (typeof window !== 'undefined') {
-              console.log('[歌词调试] 触发 lyricUpdated 事件，trackId:', trackId, 'urlId:', urlId)
-              window.dispatchEvent(new CustomEvent('lyricUpdated', { 
-                detail: { 
-                  trackId: String(trackId), 
-                  lrc: responseData.data.lrc, 
-                  rid: String(trackId),
-                  urlId: urlId ? String(urlId) : undefined,
-                } 
-              }))
+            // 也保存 songmid（如果存在）
+            if (responseData.data.songmid) {
+              lyricCache.set(String(responseData.data.songmid), responseData.data.lrc)
             }
-          } else {
-            console.warn('[歌词调试] 响应中有歌词但没有 rid 或 id 字段')
           }
         } else {
-          console.log('[歌词调试] 响应中没有 lrc 字段或 lrc 不是字符串')
+          console.log('[Lyrics] 响应中没有 lrc 字段或 lrc 不是字符串')
         }
-      } else {
-        console.log('[歌词调试] 响应数据格式不正确，不是预期的对象格式')
       }
     }
     
@@ -544,7 +935,14 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
       url += (url.includes('?') ? '&' : '?') + params
     }
     
-    const method = config.method?.toUpperCase() || 'GET'
+    // 修正部分公共音源在 quality 映射缺失时生成的 /undefined 请求
+    if (/\/url\/(tx|wy)\/[^/]+\/undefined/.test(url)) {
+      const fixedUrl = url.replace(/(\/url\/(tx|wy)\/[^/]+)\/undefined/, '$1/320k')
+      console.warn('[axios] 质量参数缺失，自动改写为 320k:', url, '->', fixedUrl)
+      url = fixedUrl
+    }
+    
+    let method = config.method?.toUpperCase() || 'GET'
     
     // 记录原始请求
     debugLog('request', `[axios] ${method} ${url}`, { 
@@ -553,7 +951,54 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
       hasBody: !!config.data 
     })
     
-    // 直接在这里做 URL 重写
+    // 对于 POST 请求到 musicu.fcg，尝试将 body 中的 data 参数转换为 URL 参数（如果 API 支持）
+    // QQ 音乐的 musicu.fcg API 支持通过 URL 参数传递 data
+    if (method === 'POST' && url.includes('musicu.fcg')) {
+      console.log('[axios] 检测到 POST 请求到 musicu.fcg, data 类型:', typeof config.data, 'data 值:', config.data ? (typeof config.data === 'string' ? config.data.substring(0, 50) : JSON.stringify(config.data).substring(0, 50)) : 'null')
+      
+      if (config.data) {
+        let dataString: string | undefined
+        // 如果 data 是字符串，直接使用
+        if (typeof config.data === 'string') {
+          dataString = config.data
+        } 
+        // 如果 data 是对象，尝试转换为 JSON 字符串
+        else if (typeof config.data === 'object') {
+          try {
+            dataString = JSON.stringify(config.data)
+          } catch (e) {
+            console.warn('[axios] 无法序列化 data:', e)
+          }
+        }
+        
+        if (dataString) {
+          try {
+            const urlObj = new URL(url)
+            // 如果 URL 中已经有 data 参数，不转换
+            if (!urlObj.searchParams.has('data')) {
+              urlObj.searchParams.set('data', dataString)
+              url = urlObj.toString()
+              console.log('[axios] 将 POST body 转换为 GET 参数:', url.substring(0, 150))
+              // 将方法改为 GET
+              method = 'GET'
+              // 清除 body
+              config.data = undefined
+            } else {
+              console.log('[axios] URL 中已有 data 参数，不转换')
+            }
+          } catch (e) {
+            // URL 解析失败，继续使用 POST
+            console.warn('[axios] POST 转 GET 失败:', e)
+          }
+        } else {
+          console.log('[axios] data 无法转换为字符串，保持 POST')
+        }
+      } else {
+        console.log('[axios] POST 请求没有 data，保持 POST')
+      }
+    }
+    
+    // 直接在这里做 URL 重写（开发环境使用本地代理，生产环境使用 API 代理）
     let finalUrl = url
     const rewritten = rewriteUrl(url)
     if (rewritten) {
@@ -562,12 +1007,43 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
       console.log('[axios] URL 重写:', url, '->', finalUrl)
     }
     
-    const init: RequestInit = {
-      method,
-      headers: config.headers,
+    const baseHeaders =
+      config.headers instanceof Headers
+        ? Object.fromEntries(config.headers.entries())
+        : Array.isArray(config.headers)
+          ? Object.fromEntries(config.headers)
+          : { ...(config.headers || {}) }
+    
+    const cookieHeader = baseHeaders['Cookie'] || baseHeaders['cookie']
+    if (cookieHeader) {
+      baseHeaders['X-Forwarded-Cookie'] = cookieHeader
+      delete baseHeaders['Cookie']
+      delete baseHeaders['cookie']
     }
     
-    if (config.data && init.method !== 'GET') {
+    // QQ 音乐 API 需要 Referer header，否则会返回错误
+    // 如果请求的是 QQ 音乐 API 且没有设置 Referer，自动添加
+    if ((finalUrl.includes('c.y.qq.com') || finalUrl.includes('u.y.qq.com') || finalUrl.includes('i.y.qq.com') || finalUrl.includes('y.qq.com')) && 
+        !baseHeaders['Referer'] && !baseHeaders['referer']) {
+      baseHeaders['Referer'] = 'https://y.qq.com'
+      console.log('[axios] 自动添加 Referer header 用于 QQ 音乐 API')
+    }
+    
+    const init: RequestInit = {
+      method: method as RequestInit['method'],
+      headers: baseHeaders,
+    }
+    
+    // 网易 EAPI 需要指定国内 IP，否则会返回 -460（Cheating）
+    if (finalUrl.startsWith('/api/proxy/neteasem/') || finalUrl.startsWith('/proxy/neteasem/')) {
+      const headersRecord = init.headers as Record<string, string>
+      if (!headersRecord['X-Real-IP']) {
+        headersRecord['X-Real-IP'] = '118.88.88.88'
+      }
+    }
+    
+    // 只有在非 GET 请求且 data 未被清除时才设置 body
+    if (config.data && method !== 'GET') {
       if (typeof config.data === 'string') {
         init.body = config.data
       } else {
@@ -575,13 +1051,38 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
         init.headers = { ...init.headers, 'Content-Type': 'application/json' }
       }
       debugLog('info', `[axios] 请求体: ${typeof config.data === 'string' ? config.data.substring(0, 200) : JSON.stringify(config.data).substring(0, 200)}...`)
+    } else if (method === 'GET' && config.data) {
+      // GET 请求不应该有 body，如果还有 data，说明转换可能有问题
+      console.warn('[axios] GET 请求仍有 data，已清除:', config.data)
+      config.data = undefined
     }
     
     console.log('[axios] 请求:', init.method, finalUrl)
     
     try {
-      const response = await fetch(finalUrl, init)
-      const result = await processResponse(response, url) // 传递原始 URL 用于检测
+      // 使用 proxiedFetch 而不是直接使用 fetch，确保通过 CORS 代理
+      const response = await _proxiedFetch(finalUrl, init)
+      
+      // 如果请求的是 API 代理且返回 HTML，说明 serverless function 没有工作
+      // 需要回退到原始 URL 并使用 CORS 代理
+      if (finalUrl.startsWith('/api/proxy/')) {
+        const contentType = response.headers.get('content-type') || ''
+        if (contentType.includes('text/html')) {
+          console.warn('[axios] API 代理返回 HTML，回退到原始 URL 并使用 CORS 代理')
+          // 提取原始 URL
+          const originalUrl = extractOriginalUrl(finalUrl)
+          if (originalUrl) {
+            // 重新请求原始 URL，这次会使用 CORS 代理（因为 rewriteUrl 会返回 null，不会再次重写）
+            console.log('[axios] 回退到原始 URL:', originalUrl)
+            const retryResponse = await _proxiedFetch(originalUrl, init)
+            const result = await processResponse(retryResponse, originalUrl)
+            console.log('[axios] CORS 代理响应:', retryResponse.status)
+            return result
+          }
+        }
+      }
+      
+      const result = await processResponse(response, finalUrl)
       
       // 记录响应
       const dataPreview = typeof result.data === 'string' 
@@ -602,6 +1103,50 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
       console.log('[axios] 响应:', response.status)
       return result
     } catch (error) {
+      // 如果错误是 invalid referer 错误，说明 CORS 代理无法传递 Referer header
+      // 这是公共 CORS 代理的限制，无法解决
+      if (error instanceof Error && (error.message.includes('Invalid referer') || (error as Error & { needsReferer?: boolean }).needsReferer)) {
+        console.error('[axios] Invalid referer 错误：公共 CORS 代理无法传递 Referer header，这是已知限制')
+        // 尝试使用其他 CORS 代理（虽然它们也可能无法传递 Referer）
+        if (finalUrl.startsWith('/api/proxy/')) {
+          const originalUrl = extractOriginalUrl(finalUrl)
+          if (originalUrl && originalUrl.includes('y.qq.com')) {
+            console.warn('[axios] 尝试使用 allorigins 代理（虽然可能也无法传递 Referer）')
+            try {
+              const alloriginsUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(originalUrl)}`
+              const retryResponse = await fetch(alloriginsUrl, { signal: init?.signal })
+              if (retryResponse.ok) {
+                const retryResult = await processResponse(retryResponse, originalUrl)
+                console.log('[axios] allorigins 代理响应:', retryResponse.status)
+                return retryResult
+              }
+            } catch (retryError) {
+              console.error('[axios] allorigins 代理也失败:', retryError)
+            }
+          }
+        }
+        // 如果所有尝试都失败，抛出错误
+        debugLog('error', `[axios] Invalid referer 错误，无法解决: ${error.message}`)
+        throw error
+      }
+      
+      // 如果错误是 HTML 错误且是 API 代理请求，尝试回退到原始 URL
+      if (error instanceof Error && error.message.includes('HTML') && finalUrl.startsWith('/api/proxy/')) {
+        console.warn('[axios] API 代理返回 HTML 错误，尝试回退到原始 URL')
+        try {
+          // 提取原始 URL
+          const originalUrl = extractOriginalUrl(finalUrl)
+          if (originalUrl) {
+            console.log('[axios] 回退到原始 URL:', originalUrl)
+            const retryResponse = await _proxiedFetch(originalUrl, init)
+            const result = await processResponse(retryResponse, originalUrl)
+            console.log('[axios] CORS 代理响应:', retryResponse.status)
+            return result
+          }
+        } catch (retryError) {
+          console.error('[axios] 回退到 CORS 代理也失败:', retryError)
+        }
+      }
       debugLog('error', `[axios] 请求失败: ${error instanceof Error ? error.message : String(error)}`)
       throw error
     }
@@ -989,15 +1534,15 @@ const createDayjsShim = () => {
 
 // 创建 require 函数
 const createRequireShim = (proxiedFetch: typeof fetch) => {
-  // 获取全局加载的库
+  // 优先使用本地打包的库，如果没有则使用全局变量或 shim
   const globalCryptoJS = (window as unknown as { CryptoJS?: unknown }).CryptoJS
   const globalBigInt = (window as unknown as { bigInt?: unknown }).bigInt
   
   const modules: Record<string, unknown> = {
     'axios': createAxiosShim(proxiedFetch),
     'cheerio': createCheerioShim(),
-    'crypto-js': globalCryptoJS || createCryptoShim(),
-    'big-integer': globalBigInt,
+    'crypto-js': CryptoJS || globalCryptoJS || createCryptoShim(),
+    'big-integer': bigInt || globalBigInt,
     'qs': {
       stringify: (obj: Record<string, string>) => new URLSearchParams(obj).toString(),
       parse: (str: string) => Object.fromEntries(new URLSearchParams(str)),
@@ -1208,6 +1753,18 @@ interface MusicFreeNativePlugin {
     isEnd: boolean
     musicList: MusicFreeTrack[]
   }>
+  getTopLists?: () => Promise<any>
+  getTopListDetail?: (topListItem: MusicFreePlaylist) => Promise<{
+    topListItem?: MusicFreePlaylist
+    musicList?: MusicFreeTrack[]
+  }>
+  getRecommendSheetTags?: () => Promise<any>
+  getRecommendSheetsByTag?: (tag: unknown, page?: number) => Promise<{
+    data?: MusicFreePlaylist[]
+    playlist?: MusicFreePlaylist[]
+    list?: MusicFreePlaylist[]
+    isEnd?: boolean
+  }>
 }
 
 interface MusicFreeTrack {
@@ -1252,6 +1809,17 @@ interface MusicFreePlaylist {
   description?: string
   [key: string]: unknown
 }
+
+const mapPlaylistItem = (playlist: MusicFreePlaylist): PluginPlaylist => ({
+  id: String(playlist.id ?? ''),
+  title: playlist.title || '',
+  artist: playlist.artist,
+  coverUrl: playlist.artwork,
+  playCount: playlist.playCount,
+  worksNum: playlist.worksNums,
+  description: playlist.description,
+  extra: playlist,
+})
 
 // 映射歌曲
 const mapTrack = (track: MusicFreeTrack): PluginTrack => ({
@@ -1356,16 +1924,7 @@ const adaptMusicFreePlugin = (
       }
       try {
         const result = await native.search(query, page, 'sheet')
-        const mapped = (result?.data || []).map((p: MusicFreePlaylist) => ({
-          id: String(p.id || ''),
-          title: p.title || '',
-          artist: p.artist,
-          coverUrl: p.artwork,
-          playCount: p.playCount,
-          worksNum: p.worksNums,
-          description: p.description,
-          extra: p,
-        }))
+        const mapped = (result?.data || []).map((p: MusicFreePlaylist) => mapPlaylistItem(p))
         return {
           data: mapped,
           isEnd: result?.isEnd ?? mapped.length < 20,
@@ -1418,6 +1977,85 @@ const adaptMusicFreePlugin = (
         return []
       }
     },
+
+    async getTopLists() {
+      if (!native.getTopLists) {
+        return []
+      }
+      try {
+        const result = await native.getTopLists()
+        const groups = Array.isArray(result) ? result : []
+        return groups.map((group: any) => ({
+          title: group?.title || group?.name || '',
+          data: Array.isArray(group?.data || group?.list)
+            ? (group.data || group.list).map((item: MusicFreePlaylist) => mapPlaylistItem(item))
+            : [],
+        }))
+      } catch (error) {
+        console.error('[MusicFree Plugin] getTopLists error:', error)
+        return []
+      }
+    },
+
+    async getTopListDetail(playlist) {
+      const handler = native.getTopListDetail || native.getMusicSheetInfo
+      if (!handler) {
+        return { topListItem: playlist, musicList: [] }
+      }
+      try {
+        const result: any = await handler(playlist.extra as MusicFreePlaylist, 1)
+        const musicList = Array.isArray(result?.musicList) ? result.musicList.map(mapTrack) : []
+        let topItem: PluginPlaylist = playlist
+        if (result?.topListItem) {
+          topItem = mapPlaylistItem(result.topListItem as MusicFreePlaylist)
+        } else if (result?.sheetItem) {
+          topItem = mapPlaylistItem(result.sheetItem as MusicFreePlaylist)
+        }
+        return {
+          topListItem: topItem,
+          musicList,
+        }
+      } catch (error) {
+        console.error('[MusicFree Plugin] getTopListDetail error:', error)
+        return { topListItem: playlist, musicList: [] }
+      }
+    },
+
+    async getRecommendSheetTags() {
+      if (!native.getRecommendSheetTags) {
+        return []
+      }
+      try {
+        return await native.getRecommendSheetTags()
+      } catch (error) {
+        console.error('[MusicFree Plugin] getRecommendSheetTags error:', error)
+        return []
+      }
+    },
+
+    async getRecommendSheetsByTag(tag: PluginRecommendTag | string, page = 1) {
+      if (!native.getRecommendSheetsByTag) {
+        return { data: [], isEnd: true }
+      }
+      try {
+        const payload =
+          typeof tag === 'object' && tag !== null
+            ? ((tag as PluginRecommendTag).raw as any) || tag
+            : tag
+        const result = await native.getRecommendSheetsByTag(payload, page)
+        const collection = result?.data || result?.playlist || result?.list || []
+        const mapped = Array.isArray(collection)
+          ? collection.map((p: MusicFreePlaylist) => mapPlaylistItem(p))
+          : []
+        return {
+          data: mapped,
+          isEnd: result?.isEnd ?? mapped.length < 20,
+        }
+      } catch (error) {
+        console.error('[MusicFree Plugin] getRecommendSheetsByTag error:', error)
+        return { data: [], isEnd: true }
+      }
+    },
     
     async resolveStream(track) {
       if (track.streamUrl) {
@@ -1425,44 +2063,76 @@ const adaptMusicFreePlugin = (
       }
       
       if (native.getMediaSource && track.extra) {
-        const qualities = ['128', 'standard', '320', 'high', 'low', 'super']
+        // 优先尝试标准/高清等约定名称，最后才尝试数字形式，避免出现 /undefined
+        const qualities = ['standard', 'high', 'super', 'low', 'lossless', '128', '320']
         for (const quality of qualities) {
           try {
             const result = await native.getMediaSource(track.extra as MusicFreeTrack, quality)
-            console.log('[歌词调试] pluginHost resolveStream - getMediaSource 返回:', {
-              url: result?.url,
-              hasLrc: !!(result as any)?.lrc,
-              lrcLength: (result as any)?.lrc?.length,
-              hasData: !!(result as any)?.data,
-              dataLrc: !!(result as any)?.data?.lrc,
-              fullResult: result,
-            })
             
-            // 处理返回的数据结构：可能是 { url, lrc } 或 { data: { url, lrc } }
+            console.log('[Lyrics] getMediaSource 原始返回:', JSON.stringify(result).substring(0, 500))
+            
+            // 处理返回的数据结构：可能是多种格式
+            // 1. { code: 200, data: { url, lrc, ... } }
+            // 2. { data: { url, lrc, ... } }
+            // 3. { url, lrc, ... }
+            // 4. 直接返回 { url }
             let url: string | undefined
             let lrc: string | undefined
             
-            if ((result as any)?.data) {
-              // 如果返回的是 { data: { url, lrc, ... } } 格式
-              const data = (result as any).data
+            const resultAny = result as any
+            
+            // 检查是否有 code 字段，如果有，说明是 { code: 200, data: {...} } 格式
+            if (resultAny?.code === 200 && resultAny?.data) {
+              const data = resultAny.data
               url = data.url
               lrc = data.lrc
-            } else {
-              // 如果返回的是 { url, lrc, ... } 格式
-              url = result?.url
-              lrc = (result as any)?.lrc
+              console.log('[Lyrics] 格式1: { code: 200, data: { url, lrc } }')
+            }
+            // 检查是否有 data 字段（但没有 code）
+            else if (resultAny?.data && !resultAny?.code) {
+              const data = resultAny.data
+              url = data.url
+              lrc = data.lrc
+              console.log('[Lyrics] 格式2: { data: { url, lrc } }')
+            }
+            // 直接包含 url 和 lrc
+            else {
+              url = resultAny?.url || result?.url
+              lrc = resultAny?.lrc
+              console.log('[Lyrics] 格式3: { url, lrc } 或 { url }')
             }
             
+            // 如果从返回数据中没有找到歌词，尝试从缓存中获取
+            if (!lrc && track.extra) {
+              const trackExtra = track.extra as any
+              const trackId = trackExtra.songmid || trackExtra.id || track.id
+              if (trackId) {
+                const cachedLyric = lyricCache.get(String(trackId))
+                if (cachedLyric) {
+                  console.log('[Lyrics] ✓ 从缓存中获取歌词，trackId:', trackId, '长度:', cachedLyric.length)
+                  lrc = cachedLyric
+                } else {
+                  console.log('[Lyrics] 缓存中没有找到歌词，trackId:', trackId, '可用缓存键:', Array.from(lyricCache.keys()))
+                }
+              }
+            }
+            
+            console.log('[Lyrics] 提取结果 - url:', url ? '存在' : '不存在', 'lrc:', lrc ? `存在(${lrc.length}字符)` : '不存在')
+            
             if (url) {
-              // 如果返回的数据中包含 lrc，需要保存到 track.extra 中
-              // 但是这里无法直接更新 track，所以返回一个包含 lrc 的对象
-              if (lrc) {
-                console.log('[歌词调试] pluginHost 找到歌词，长度:', lrc.length)
-                // 返回包含 lrc 的对象，让调用者知道有歌词数据
+              // 如果返回的数据中包含 lrc，将其作为额外数据返回
+              if (lrc && typeof lrc === 'string' && lrc.trim().length > 0) {
+                console.log('[Lyrics] ✓ 找到歌词，长度:', lrc.length)
+                console.log('[Lyrics] 歌词预览:', lrc.substring(0, 200))
                 return { 
                   url: url,
-                  _lrc: lrc, // 使用 _lrc 作为临时字段
+                  extra: { lrc: lrc },
                 } as any
+              } else {
+                console.log('[Lyrics] ✗ 未找到有效歌词数据')
+                if (lrc) {
+                  console.log('[Lyrics] lrc 类型:', typeof lrc, '长度:', lrc.length)
+                }
               }
               return { url: url }
             }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useMemo } from 'react'
+import { useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { 
   ChevronDown, 
@@ -13,9 +13,10 @@ import {
   Volume2,
   VolumeX,
   Loader2,
+  RotateCw,
 } from 'lucide-react'
 import { usePlayerStore, PlayMode } from '../stores/playerStore'
-import { getCurrentLyricIndex } from '../utils/lyricParser'
+import { getCurrentLyricIndex } from '../lib/lyrics'
 
 const formatTime = (seconds: number): string => {
   if (!seconds || !isFinite(seconds)) return '0:00'
@@ -41,9 +42,10 @@ const playModeLabels: Record<PlayMode, string> = {
 interface PlayerProps {
   onClose: () => void
   onSeek: (time: number) => void
+  onRetry?: () => void
 }
 
-export function Player({ onClose, onSeek }: PlayerProps) {
+export function Player({ onClose, onSeek, onRetry }: PlayerProps) {
   const {
     currentTrack,
     currentStream,
@@ -55,6 +57,7 @@ export function Player({ onClose, onSeek }: PlayerProps) {
     muted,
     playMode,
     lyrics,
+    error,
     setIsPlaying,
     setVolume,
     toggleMute,
@@ -62,159 +65,261 @@ export function Player({ onClose, onSeek }: PlayerProps) {
     playNext,
     playPrevious,
   } = usePlayerStore()
-
-  const lyricContainerRef = useRef<HTMLDivElement>(null)
-  const userScrollingRef = useRef(false) // 用户是否正在滚动
-  const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null) // 滚动超时定时器
-  const lastAutoScrollIndexRef = useRef(-1) // 上次自动滚动的歌词索引
   
-  // 使用 useMemo 确保 currentLyricIndex 正确计算
-  // 注意：currentTime 会频繁更新，但只有当索引真正变化时才需要重新渲染
-  const currentLyricIndex = useMemo(() => {
-    const index = getCurrentLyricIndex(lyrics, currentTime)
-    return index
-  }, [lyrics, currentTime])
-
-  // 滚动到指定歌词行（确保歌词在容器中间）
-  const scrollToLyric = useCallback((index: number, behavior: ScrollBehavior = 'smooth') => {
-    if (!lyricContainerRef.current || index < 0) {
+  const lyricsContainerRef = useRef<HTMLDivElement>(null)
+  const lyricsContentRef = useRef<HTMLDivElement>(null)
+  const lyricElementsRef = useRef<Map<number, HTMLElement>>(new Map())
+  const currentLyricIndex = getCurrentLyricIndex(lyrics, currentTime)
+  const scrollAnimationRef = useRef<number>()
+  const lastLyricIndexRef = useRef<number>(-1)
+  const lastTrackIdRef = useRef<string | undefined>(undefined)
+  const isUserScrollingRef = useRef<boolean>(false)
+  const userScrollTimeoutRef = useRef<number>()
+  const isProgrammaticScrollRef = useRef<boolean>(false)
+  const hasInitializedScrollRef = useRef<boolean>(false)
+  
+  /**
+   * 将指定歌词滚动到容器中心位置
+   */
+  const scrollLyricToCenter = (lyricIndex: number, immediate = false) => {
+    const container = lyricsContainerRef.current
+    
+    if (!container) return
+    
+    const lyricElement = lyricElementsRef.current.get(lyricIndex)
+    if (!lyricElement) return
+    
+    // 1. 确定歌词展示区域（容器）和中心位置
+    const containerHeight = container.clientHeight
+    const containerCenter = containerHeight / 2
+    
+    // 2. 获取元素和容器的位置信息
+    const elementRect = lyricElement.getBoundingClientRect()
+    const containerRect = container.getBoundingClientRect()
+    
+    // 3. 计算元素中心点相对于容器顶部的距离
+    const elementCenter = elementRect.top - containerRect.top + elementRect.height / 2
+    
+    // 4. 计算需要滚动的距离：使元素中心对齐容器中心
+    const scrollDistance = elementCenter - containerCenter
+    
+    // 5. 如果距离很小，不需要滚动
+    if (Math.abs(scrollDistance) < 1) return
+    
+    // 6. 清除之前的滚动动画
+    if (scrollAnimationRef.current) {
+      cancelAnimationFrame(scrollAnimationRef.current)
+    }
+    
+    if (immediate) {
+      // 立即滚动（用于歌曲切换时）
+      isProgrammaticScrollRef.current = true
+      container.scrollTop += scrollDistance
+      // 延迟重置标记，确保 scroll 事件能检测到
+      setTimeout(() => {
+        isProgrammaticScrollRef.current = false
+      }, 50)
       return
     }
     
-    const container = lyricContainerRef.current
+    // 7. 平滑滚动动画
+    let startTime: number | null = null
+    const startScrollTop = container.scrollTop
+    const targetScrollTop = startScrollTop + scrollDistance
+    const duration = 400 // 动画时长（毫秒）
     
-    // 方法1: 尝试通过 data-lyric-index 属性查找
-    const lyricElementByAttr = container.querySelector(`[data-lyric-index="${index}"]`) as HTMLElement
-    
-    // 方法2: 如果方法1失败，尝试通过 children 查找
-    let lyricElement = lyricElementByAttr
-    if (!lyricElement) {
-      const innerContainer = container.firstElementChild as HTMLElement
-      if (innerContainer && innerContainer.children[index]) {
-        lyricElement = innerContainer.children[index] as HTMLElement
+    const animate = (timestamp: number) => {
+      if (!startTime) {
+        startTime = timestamp
       }
-    }
-    
-    if (!lyricElement) {
-      return
-    }
-    
-    // 使用 scrollIntoView 方法，确保歌词在容器中间
-    try {
-      lyricElement.scrollIntoView({
-        behavior,
-        block: 'center',
-        inline: 'nearest',
-      })
-    } catch (error) {
-      // 回退到手动计算，确保精确居中
-      const containerRect = container.getBoundingClientRect()
-      const elementRect = lyricElement.getBoundingClientRect()
-      const scrollTop = container.scrollTop
       
-      // 计算目标位置：元素顶部 - 容器高度的一半 + 元素高度的一半
-      const targetScrollTop = scrollTop + (elementRect.top - containerRect.top) - (containerRect.height / 2) + (elementRect.height / 2)
+      const elapsed = timestamp - startTime
+      const progress = Math.min(elapsed / duration, 1)
       
-      container.scrollTo({
-        top: Math.max(0, targetScrollTop),
-        behavior,
-      })
-    }
-  }, [])
-
-  // 处理用户滚动
-  const handleLyricScroll = useCallback(() => {
-    if (!lyricContainerRef.current) return
-    
-    // 标记用户正在滚动
-    userScrollingRef.current = true
-    
-    // 清除之前的定时器
-    if (scrollTimeoutRef.current) {
-      clearTimeout(scrollTimeoutRef.current)
-    }
-    
-    // 5秒后恢复自动滚动
-    scrollTimeoutRef.current = setTimeout(() => {
-      userScrollingRef.current = false
-      // 恢复后立即滚动到当前歌词行
-      const currentIndex = getCurrentLyricIndex(lyrics, currentTime)
-      if (currentIndex >= 0) {
-        scrollToLyric(currentIndex)
-        lastAutoScrollIndexRef.current = currentIndex
-      }
-    }, 5000)
-  }, [lyrics, currentTime, scrollToLyric])
-
-  // 处理歌词行点击
-  const handleLyricClick = useCallback((line: { time: number; text: string }) => {
-    onSeek(line.time)
-    // 立即滚动到这一行
-    const index = lyrics.findIndex(l => l.time === line.time)
-    if (index >= 0) {
-      scrollToLyric(index, 'smooth')
-      lastAutoScrollIndexRef.current = index
-      // 重置用户滚动标志，允许自动滚动
-      userScrollingRef.current = false
-      if (scrollTimeoutRef.current) {
-        clearTimeout(scrollTimeoutRef.current)
+      // 使用 ease-out 缓动函数
+      const easeOut = 1 - Math.pow(1 - progress, 3)
+      
+      // 标记为程序滚动
+      isProgrammaticScrollRef.current = true
+      container.scrollTop = startScrollTop + scrollDistance * easeOut
+      
+      if (progress < 1) {
+        scrollAnimationRef.current = requestAnimationFrame(animate)
+      } else {
+        // 动画完成，精确定位
+        container.scrollTop = targetScrollTop
+        // 延迟重置标记，确保 scroll 事件能检测到
+        setTimeout(() => {
+          isProgrammaticScrollRef.current = false
+        }, 50)
       }
     }
-  }, [lyrics, onSeek, scrollToLyric])
-
-
-  // 当歌词加载完成时，自动定位到当前歌词
+    
+    scrollAnimationRef.current = requestAnimationFrame(animate)
+  }
+  
+  // 检测用户手动滚动和其他交互操作
   useEffect(() => {
-    if (lyrics.length > 0 && currentLyricIndex >= 0 && !userScrollingRef.current) {
-      // 延迟一下确保DOM已渲染
-      const timer = setTimeout(() => {
-        if (lyricContainerRef.current && !userScrollingRef.current) {
-          scrollToLyric(currentLyricIndex, 'smooth')
-          lastAutoScrollIndexRef.current = currentLyricIndex
-        }
-      }, 150)
-      return () => clearTimeout(timer)
-    }
-  }, [lyrics.length, currentLyricIndex, scrollToLyric])
-
-  // 自动滚动到当前歌词行（仅在用户未主动滚动时）
-  // 这是主要的自动滚动逻辑，响应 currentTime 的变化
-  // 使用和进入播放页面时相同的定位方法（延迟 150ms）
-  useEffect(() => {
-    // 只有在有歌词且索引有效时才滚动
-    if (lyrics.length === 0 || currentLyricIndex < 0) {
-      return
-    }
+    const container = lyricsContainerRef.current
+    if (!container) return
     
-    // 如果用户正在滚动，不自动滚动
-    if (userScrollingRef.current) {
-      return
-    }
-    
-    // 如果索引没有变化，不重复滚动
-    if (currentLyricIndex === lastAutoScrollIndexRef.current) {
-      return
-    }
-    
-    // 使用和进入播放页面时相同的延迟方法（150ms），确保DOM已渲染
-    const timer = setTimeout(() => {
-      if (lyricContainerRef.current && !userScrollingRef.current) {
-        scrollToLyric(currentLyricIndex, 'smooth')
-        lastAutoScrollIndexRef.current = currentLyricIndex
+    const handleUserInteraction = () => {
+      // 标记用户正在操作
+      isUserScrollingRef.current = true
+      
+      // 清除之前的定时器
+      if (userScrollTimeoutRef.current) {
+        clearTimeout(userScrollTimeoutRef.current)
       }
-    }, 150)
+      
+      // 用户停止操作 3 秒后，允许自动居中
+      userScrollTimeoutRef.current = window.setTimeout(() => {
+        isUserScrollingRef.current = false
+      }, 3000)
+    }
     
-    return () => clearTimeout(timer)
-  }, [currentLyricIndex, scrollToLyric])
-
-  // 清理定时器
-  useEffect(() => {
+    const handleScroll = () => {
+      // 如果是程序触发的滚动，不标记为用户操作
+      if (isProgrammaticScrollRef.current) {
+        isProgrammaticScrollRef.current = false
+        return
+      }
+      
+      // 用户主动滚动
+      handleUserInteraction()
+    }
+    
+    // 监听用户交互事件（触摸、鼠标、滚轮）
+    const handleTouchStart = () => handleUserInteraction()
+    const handleMouseDown = () => handleUserInteraction()
+    const handleWheel = () => handleUserInteraction()
+    
+    container.addEventListener('scroll', handleScroll, { passive: true })
+    container.addEventListener('touchstart', handleTouchStart, { passive: true })
+    container.addEventListener('mousedown', handleMouseDown, { passive: true })
+    container.addEventListener('wheel', handleWheel, { passive: true })
+    
     return () => {
-      if (scrollTimeoutRef.current) {
-        clearTimeout(scrollTimeoutRef.current)
+      container.removeEventListener('scroll', handleScroll)
+      container.removeEventListener('touchstart', handleTouchStart)
+      container.removeEventListener('mousedown', handleMouseDown)
+      container.removeEventListener('wheel', handleWheel)
+      if (userScrollTimeoutRef.current) {
+        clearTimeout(userScrollTimeoutRef.current)
       }
     }
   }, [])
+  
+  // 歌曲切换时，定位到当前播放的歌词行（如果已在播放）或第一句歌词
+  useEffect(() => {
+    if (!currentTrack) return
+    
+    if (currentTrack.id !== lastTrackIdRef.current) {
+      lastTrackIdRef.current = currentTrack.id
+      lastLyricIndexRef.current = -1
+      isUserScrollingRef.current = false // 重置用户滚动状态
+      hasInitializedScrollRef.current = false // 重置初始化标记
+      
+      // 清除之前的滚动动画和定时器
+      if (scrollAnimationRef.current) {
+        cancelAnimationFrame(scrollAnimationRef.current)
+      }
+      if (userScrollTimeoutRef.current) {
+        clearTimeout(userScrollTimeoutRef.current)
+      }
+      
+      // 等待歌词渲染完成后，定位到当前播放的歌词行或第一句
+      if (lyrics.length > 0) {
+        const tryScrollToLyric = () => {
+          requestAnimationFrame(() => {
+            // 如果歌曲已经在播放中（currentTime > 0），定位到当前播放的歌词行
+            const targetIndex = currentTime > 0 ? currentLyricIndex : 0
+            const targetElement = lyricElementsRef.current.get(targetIndex)
+            
+            if (targetElement) {
+              // 立即滚动到目标歌词（不重置到顶部）
+              scrollLyricToCenter(targetIndex, false)
+            } else {
+              // 如果元素还没渲染，再等待
+              setTimeout(tryScrollToLyric, 50)
+            }
+          })
+        }
+        setTimeout(tryScrollToLyric, 100)
+      } else {
+        // 如果没有歌词，重置到顶部
+        const container = lyricsContainerRef.current
+        if (container) {
+          isProgrammaticScrollRef.current = true
+          container.scrollTop = 0
+          setTimeout(() => {
+            isProgrammaticScrollRef.current = false
+          }, 50)
+        }
+      }
+    }
+  }, [currentTrack?.id, lyrics.length, currentTime, currentLyricIndex])
+  
+  // 歌词首次加载完成时，如果歌曲正在播放，定位到当前播放的歌词行
+  useEffect(() => {
+    if (!currentTrack || lyrics.length === 0 || hasInitializedScrollRef.current) return
+    
+    // 如果歌曲已经在播放中（currentTime > 0），定位到当前播放的歌词行
+    if (currentTime > 0 && currentLyricIndex >= 0) {
+      const tryScrollToCurrent = () => {
+        requestAnimationFrame(() => {
+          const targetElement = lyricElementsRef.current.get(currentLyricIndex)
+          if (targetElement) {
+            scrollLyricToCenter(currentLyricIndex, false)
+            hasInitializedScrollRef.current = true
+          } else {
+            // 如果元素还没渲染，再等待
+            setTimeout(tryScrollToCurrent, 50)
+          }
+        })
+      }
+      setTimeout(tryScrollToCurrent, 100)
+    } else {
+      // 如果歌曲还没开始播放，标记为已初始化（会在歌曲切换时重置）
+      hasInitializedScrollRef.current = true
+    }
+  }, [lyrics.length, currentTime, currentLyricIndex, currentTrack?.id])
+  
+  // 当歌词索引改变时，平滑滚动到新的歌词位置
+  useEffect(() => {
+    if (currentLyricIndex < 0 || currentLyricIndex === lastLyricIndexRef.current) {
+      return
+    }
+    
+    // 如果用户正在手动滚动，不自动滚动
+    if (isUserScrollingRef.current) {
+      lastLyricIndexRef.current = currentLyricIndex
+      return
+    }
+    
+    // 如果还没有初始化过，不自动滚动（等待初始化完成）
+    if (!hasInitializedScrollRef.current) {
+      lastLyricIndexRef.current = currentLyricIndex
+      return
+    }
+    
+    lastLyricIndexRef.current = currentLyricIndex
+    
+    // 延迟一小段时间，确保 DOM 已更新
+    const timeoutId = setTimeout(() => {
+      // 再次检查用户是否在滚动
+      if (!isUserScrollingRef.current) {
+        scrollLyricToCenter(currentLyricIndex, false)
+      }
+    }, 100)
+    
+    return () => {
+      clearTimeout(timeoutId)
+      if (scrollAnimationRef.current) {
+        cancelAnimationFrame(scrollAnimationRef.current)
+      }
+    }
+  }, [currentLyricIndex])
   
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const time = parseFloat(e.target.value)
@@ -243,65 +348,88 @@ export function Player({ onClose, onSeek }: PlayerProps) {
       transition={{ type: 'spring', damping: 30, stiffness: 300 }}
       className="fixed inset-0 z-50 bg-gradient-to-b from-surface-900 via-surface-950 to-black flex flex-col"
     >
-      {/* 头部 */}
-      <header className="flex items-center justify-between px-4 py-4 pt-safe">
-        <button
-          onClick={onClose}
-          className="w-10 h-10 flex items-center justify-center text-surface-400 hover:text-surface-200 transition-colors"
-        >
-          <ChevronDown className="w-6 h-6" />
-        </button>
-        <div className="text-center">
-          <p className="text-xs text-surface-500 uppercase tracking-wider">正在播放</p>
+      <div className="max-w-2xl mx-auto w-full h-full flex flex-col">
+        {/* 头部 */}
+        <header className="flex items-center justify-between px-4 py-4 pt-safe">
+          <button
+            onClick={onClose}
+            className="w-10 h-10 flex items-center justify-center text-surface-400 hover:text-surface-200 transition-colors"
+          >
+            <ChevronDown className="w-6 h-6" />
+          </button>
+          <div className="text-center">
+            <p className="text-xs text-surface-500 uppercase tracking-wider">正在播放</p>
+          </div>
+          <div className="w-10" />
+        </header>
+        
+        {/* 歌曲信息 */}
+        <div className="px-6 pt-6 pb-4 text-center">
+          <h2 className="font-display font-semibold text-xl text-surface-100 truncate">
+            {currentTrack?.title || '未选择歌曲'}
+          </h2>
+          <p className="text-surface-400 text-sm mt-1 truncate">
+            {currentTrack?.artists?.join(' / ') || '未知艺术家'}
+          </p>
         </div>
-        <div className="w-10" />
-      </header>
-      
-      {/* 歌词显示区域 */}
-      <div className="flex-1 flex flex-col items-center justify-center px-8 py-6 overflow-hidden">
+        
+        {/* 歌词区域 */}
         {lyrics.length > 0 ? (
           <div 
-            ref={lyricContainerRef}
-            className="flex-1 w-full max-w-2xl overflow-y-auto scrollbar-thin scrollbar-thumb-surface-700 scrollbar-track-transparent"
-            style={{ minHeight: 0 }} // 确保 flex-1 能正确计算高度
-            onScroll={handleLyricScroll}
+            ref={lyricsContainerRef}
+            className="flex-1 overflow-y-auto px-6 pb-4 min-h-0"
           >
-            <div className="space-y-4 px-4 py-8">
-              {lyrics.map((line, index) => {
-                const isActive = index === currentLyricIndex
-                return (
-                  <div
-                    key={index}
-                    data-lyric-index={index}
-                    onClick={() => handleLyricClick(line)}
-                    className={`text-center transition-all duration-300 cursor-pointer ${
-                      isActive
-                        ? 'text-primary-400 text-xl font-medium scale-105'
-                        : 'text-surface-400 text-base opacity-60 hover:opacity-80'
-                    }`}
-                  >
-                    {line.text || ' '}
-                  </div>
-                )
-              })}
-            </div>
+            <div ref={lyricsContentRef} className="space-y-2 text-center py-8">
+            {/* 顶部占位，确保第一行歌词可以居中 */}
+            <div className="h-[40vh]" />
+            {lyrics.map((line, index) => {
+              const isActive = index === currentLyricIndex
+              const isNearActive = Math.abs(index - currentLyricIndex) <= 1
+              return (
+                <motion.p
+                  key={`${line.time}-${index}`}
+                  ref={(el) => {
+                    if (el) {
+                      lyricElementsRef.current.set(index, el)
+                    } else {
+                      lyricElementsRef.current.delete(index)
+                    }
+                  }}
+                  onClick={() => {
+                    // 点击歌词时，跳转到对应时间点
+                    onSeek(line.time)
+                  }}
+                  className={`px-4 py-1 cursor-pointer transition-colors rounded-lg ${
+                    isActive
+                      ? 'text-primary-400 text-2xl font-medium'
+                      : 'text-surface-200 text-xl hover:text-surface-100 hover:bg-surface-800/30'
+                  }`}
+                  initial={false}
+                  animate={{
+                    opacity: isActive ? 1 : isNearActive ? 0.8 : 0.7,
+                    scale: isActive ? 1.05 : 1,
+                  }}
+                  transition={{
+                    duration: 0.5,
+                    ease: [0.25, 0.1, 0.25, 1], // 更平滑的缓动曲线
+                  }}
+                  style={{
+                    willChange: isNearActive ? 'opacity, transform' : 'auto',
+                  }}
+                >
+                  {line.text || '\u00A0'}
+                </motion.p>
+              )
+            })}
+            {/* 底部占位，确保最后一行歌词可以居中 */}
+            <div className="h-[40vh]" />
           </div>
-        ) : (
-          <div className="flex-1 flex items-center justify-center text-surface-500 text-sm">
-            暂无歌词
-          </div>
-        )}
-      </div>
-      
-      {/* 歌曲信息 */}
-      <div className="px-6 pb-4 text-center">
-        <h2 className="font-display font-semibold text-xl text-surface-100 truncate">
-          {currentTrack?.title || '未选择歌曲'}
-        </h2>
-        <p className="text-surface-400 text-sm mt-1 truncate">
-          {currentTrack?.artists?.join(' / ') || '未知艺术家'}
-        </p>
-      </div>
+        </div>
+      ) : (
+        <div className="flex-1 flex items-center justify-center px-6 pb-4">
+          <p className="text-surface-500 text-sm">暂无歌词</p>
+        </div>
+      )}
       
       {/* 进度条 */}
       <div className="px-6 pb-6">
@@ -366,6 +494,16 @@ export function Player({ onClose, onSeek }: PlayerProps) {
             <SkipForward className="w-6 h-6" fill="currentColor" />
           </button>
           
+          {error && onRetry && (
+            <button
+              onClick={onRetry}
+              className="w-10 h-10 flex items-center justify-center text-red-400 hover:text-red-300 transition-colors"
+              title="重试播放"
+            >
+              <RotateCw className="w-5 h-5" />
+            </button>
+          )}
+          
           <button
             onClick={toggleMute}
             className="w-10 h-10 flex items-center justify-center text-surface-400 hover:text-surface-200 transition-colors"
@@ -392,6 +530,7 @@ export function Player({ onClose, onSeek }: PlayerProps) {
           />
           <Volume2 className="w-4 h-4 text-surface-500" />
         </div>
+      </div>
       </div>
     </motion.div>
   )

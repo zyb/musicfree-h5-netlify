@@ -1,31 +1,24 @@
-# Build stage
-FROM node:20-alpine AS builder
+# 使用 Node.js 20 作为基础镜像（某些依赖包需要 Node.js 20+）
+FROM node:20-alpine
 
+# 设置工作目录
 WORKDIR /app
 
-# Copy package files
+# 复制 package.json 和 package-lock.json
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install
+# 安装所有依赖（包括 devDependencies，用于构建）
+RUN npm ci
 
-# Copy source code
+# 复制源代码
 COPY . .
 
-# Build the application
+# 构建项目
 RUN npm run build
 
-# Production stage
-FROM nginx:alpine
+# 暴露端口（Zeabur 会自动设置 PORT 环境变量）
+EXPOSE 8080
 
-# Copy built files to nginx
-COPY --from=builder /app/dist /usr/share/nginx/html
-
-# Copy nginx configuration
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-
-# Expose port
-EXPOSE 3000
-
-CMD ["nginx", "-g", "daemon off;"]
+# 启动命令
+CMD ["node", "server.js"]
 

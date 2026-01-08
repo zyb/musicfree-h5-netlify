@@ -1,0 +1,21 @@
+{
+  "name": "MusicFree H5 - 插件化音乐播放器",
+  "short_name": "MusicFree",
+  "description": "插件化音乐播放器，支持多平台音乐源",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["music", "entertainment"],
+  "screenshots": [],
+  "prefer_related_applications": false
+}

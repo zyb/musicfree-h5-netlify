@@ -43,18 +43,45 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/proxy\/netease/, ''),
         headers: { ...commonHeaders, referer: 'https://music.163.com/', origin: 'https://music.163.com' },
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq, req) => {
+            const forwardCookie = req.headers['x-forwarded-cookie']
+            if (forwardCookie) {
+              proxyReq.setHeader('cookie', forwardCookie)
+              delete req.headers['x-forwarded-cookie']
+            }
+          })
+        },
       },
       '/proxy/neteaseapi': {
         target: 'https://interface.music.163.com',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/proxy\/neteaseapi/, ''),
         headers: { ...commonHeaders, referer: 'https://music.163.com/' },
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq, req) => {
+            const forwardCookie = req.headers['x-forwarded-cookie']
+            if (forwardCookie) {
+              proxyReq.setHeader('cookie', forwardCookie)
+              delete req.headers['x-forwarded-cookie']
+            }
+          })
+        },
       },
       '/proxy/neteasem': {
         target: 'https://interface3.music.163.com',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/proxy\/neteasem/, ''),
         headers: { ...commonHeaders, referer: 'https://music.163.com/' },
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq, req) => {
+            const forwardCookie = req.headers['x-forwarded-cookie']
+            if (forwardCookie) {
+              proxyReq.setHeader('cookie', forwardCookie)
+              delete req.headers['x-forwarded-cookie']
+            }
+          })
+        },
       },
       // ============ 酷狗音乐 ============
       '/proxy/kugou': {
@@ -310,6 +337,7 @@ export default defineConfig({
       '/proxy/haitangm': {
         target: 'http://music.haitangw.net',
         changeOrigin: true,
+        secure: false, // 允许 HTTP 目标
         rewrite: (path) => path.replace(/^\/proxy\/haitangm/, ''),
         headers: { ...commonHeaders },
       },
