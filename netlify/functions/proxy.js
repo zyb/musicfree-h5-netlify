@@ -193,6 +193,8 @@ exports.handler = async (event, context) => {
   // 路径格式: /.netlify/functions/proxy/[type]/[path] 或 /api/proxy/[type]/[path]
   let path = event.path
   console.log('[Proxy] 原始路径:', path)
+  console.log('[Proxy] 查询参数:', JSON.stringify(event.queryStringParameters))
+  console.log('[Proxy] 原始查询字符串:', event.rawQuery)
   
   // 移除 /.netlify/functions/proxy 前缀
   if (path.startsWith('/.netlify/functions/proxy')) {
@@ -223,19 +225,37 @@ exports.handler = async (event, context) => {
   }
 
   const proxyType = pathParts[0]
-  const targetPath = '/' + pathParts.slice(1).join('/')
   
-  // 构建查询字符串
+  // 处理路径和查询参数
+  // 路径可能包含查询参数（如 /path?param=value）
+  let targetPath = '/' + pathParts.slice(1).join('/')
   let queryString = ''
-  if (event.queryStringParameters && Object.keys(event.queryStringParameters).length > 0) {
-    const params = new URLSearchParams()
-    for (const [key, value] of Object.entries(event.queryStringParameters)) {
-      if (value) {
-        params.append(key, value)
-      }
-    }
-    queryString = '?' + params.toString()
+  
+  // 检查路径中是否包含查询参数
+  const pathQueryIndex = targetPath.indexOf('?')
+  if (pathQueryIndex !== -1) {
+    // 路径中包含查询参数，分离出来
+    queryString = targetPath.substring(pathQueryIndex)
+    targetPath = targetPath.substring(0, pathQueryIndex)
   }
+  
+  // 如果路径中没有查询参数，使用 event 中的查询参数
+  if (!queryString) {
+    if (event.rawQuery) {
+      queryString = '?' + event.rawQuery
+    } else if (event.queryStringParameters && Object.keys(event.queryStringParameters).length > 0) {
+      const params = new URLSearchParams()
+      for (const [key, value] of Object.entries(event.queryStringParameters)) {
+        if (value) {
+          params.append(key, value)
+        }
+      }
+      queryString = '?' + params.toString()
+    }
+  }
+  
+  console.log('[Proxy] 最终路径:', targetPath)
+  console.log('[Proxy] 最终查询字符串:', queryString)
 
   if (!proxyType || !proxyTargets[proxyType]) {
     return {
@@ -254,6 +274,14 @@ exports.handler = async (event, context) => {
 
   const config = proxyTargets[proxyType]
   const targetUrl = config.target + targetPath + queryString
+
+  console.log('[Proxy] 代理配置:', {
+    proxyType,
+    target: config.target,
+    targetPath,
+    queryString,
+    finalUrl: targetUrl,
+  })
 
   try {
     // 构建请求头
@@ -291,12 +319,18 @@ exports.handler = async (event, context) => {
 
     // 读取响应内容
     const responseText = await response.text()
+    
+    console.log('[Proxy] 响应状态:', response.status)
+    console.log('[Proxy] 响应 Content-Type:', response.headers.get('content-type'))
+    console.log('[Proxy] 响应内容长度:', responseText.length)
+    console.log('[Proxy] 响应内容预览:', responseText.substring(0, 200))
 
     // 检查是否是 HTML 错误页面
     if (responseText.trim().startsWith('<!doctype') || 
         responseText.trim().startsWith('<!DOCTYPE') || 
         responseText.trim().startsWith('<html')) {
       console.error('[Proxy Error] 收到 HTML 错误页面:', targetUrl, '状态码:', response.status)
+      console.error('[Proxy Error] HTML 内容:', responseText.substring(0, 1000))
       return {
         statusCode: response.status || 500,
         headers: {
@@ -308,6 +342,7 @@ exports.handler = async (event, context) => {
           status: response.status,
           url: targetUrl,
           message: 'The proxy server returned an HTML error page instead of the expected response',
+          htmlPreview: responseText.substring(0, 500),
         }),
       }
     }

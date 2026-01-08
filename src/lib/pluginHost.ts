@@ -47,7 +47,6 @@ const debugLog = (type: DebugLogType, message: string, data?: unknown) => {
 
 const now = () => Date.now()
 
-const isHttps = (url: string) => /^https:\/\//i.test(url)
 const isRemoteUrl = (url: string) => /^https?:\/\//i.test(url)
 
 // 检测是否是媒体资源 URL（图片、音频、视频等，这些资源通常没有 CORS 限制）
@@ -100,36 +99,6 @@ const isDevelopment = () => {
     return hostname === 'localhost' || hostname === '127.0.0.1' || hostname.startsWith('192.168.') || hostname.startsWith('10.')
   }
   return false
-}
-
-// 获取本地代理 URL（如果匹配 Vite 配置中的代理规则）
-const getLocalProxyUrl = (url: string): string | null => {
-  if (!isDevelopment()) return null
-  
-  try {
-    const urlObj = new URL(url)
-    const hostname = urlObj.hostname
-    const pathname = urlObj.pathname
-    
-    // 匹配 Vite 配置中的代理规则
-    if (hostname === 'music.haitangw.net') {
-      return `/proxy/haitangm${pathname}${urlObj.search}`
-    }
-    if (hostname === 'musicapi.haitangw.net') {
-      return `/proxy/haitang${pathname}${urlObj.search}`
-    }
-    if (hostname === 'raw.githubusercontent.com') {
-      return `/proxy/github${pathname}${urlObj.search}`
-    }
-    if (hostname === 'gitee.com') {
-      return `/proxy/gitee${pathname}${urlObj.search}`
-    }
-    // 可以添加更多匹配规则...
-  } catch {
-    // URL 解析失败，返回 null
-  }
-  
-  return null
 }
 
 // 不再使用 CORS 代理，所有请求都通过 serverless 代理处理
@@ -489,91 +458,6 @@ const rewriteUrl = (url: string): string | null => {
   return null
 }
 
-// 从重写的 URL 中提取原始 URL（用于回退）
-const extractOriginalUrl = (rewrittenUrl: string): string | null => {
-  // 匹配 /api/proxy/[type]/... 格式
-  const match = rewrittenUrl.match(/^\/api\/proxy\/([^/]+)\/(.+)$/)
-  if (!match) {
-    // 尝试匹配带查询参数的格式
-    const matchWithQuery = rewrittenUrl.match(/^\/api\/proxy\/([^/]+)\/(.+)\?(.+)$/)
-    if (matchWithQuery) {
-      const [, proxyType, path, query] = matchWithQuery
-      return extractOriginalUrlByType(proxyType, path, query)
-    }
-    return null
-  }
-  
-  const [, proxyType, pathWithQuery] = match
-  const [path, query] = pathWithQuery.includes('?') 
-    ? pathWithQuery.split('?', 2)
-    : [pathWithQuery, '']
-  
-  return extractOriginalUrlByType(proxyType, path, query)
-}
-
-// 根据代理类型提取原始 URL
-// 支持的音乐源代理映射
-const extractOriginalUrlByType = (proxyType: string, path: string, query: string): string | null => {
-  const proxyTargets: Record<string, string> = {
-    // QQ 音乐 (小秋、元力QQ)
-    qqmusic_c: 'https://c.y.qq.com',
-    qqmusic_u: 'https://u.y.qq.com',
-    qqmusic_i: 'http://i.y.qq.com',
-    // 酷我音乐 (小蜗、网易音乐灰色歌曲)
-    kuwo_search: 'http://search.kuwo.cn',
-    kuwo_m: 'http://m.kuwo.cn',
-    kuwo_wapi: 'http://wapi.kuwo.cn',
-    kuwo_kbang: 'http://kbangserver.kuwo.cn',
-    kuwo_npl: 'http://nplserver.kuwo.cn',
-    kuwo_mobile: 'http://mobileinterfaces.kuwo.cn',
-    kuwo_nmobi: 'http://nmobi.kuwo.cn',
-    // 网易云音乐 (小芸、网易音乐)
-    netease: 'https://music.163.com',
-    netease_interface: 'https://interface.music.163.com',
-    netease_interface3: 'https://interface3.music.163.com',
-    netease_y: 'https://y.music.163.com',
-    // 酷狗音乐 (小枸)
-    kugou_search: 'http://msearch.kugou.com',
-    kugou_mobilecdn: 'http://mobilecdn.kugou.com',
-    kugou_mobilecdnbj: 'http://mobilecdnbj.kugou.com',
-    kugou_lyrics: 'http://lyrics.kugou.com',
-    kugou_t: 'http://t.kugou.com',
-    kugou_www2: 'http://www2.kugou.kugou.com',
-    kugou_gateway: 'https://gateway.kugou.com',
-    kugou_songsearch: 'https://songsearch.kugou.com',
-    // B站
-    biliapi: 'https://api.bilibili.com',
-    bili: 'https://www.bilibili.com',
-    // 海棠音乐 (元力QQ)
-    haitang: 'http://musicapi.haitangw.net',
-    haitangm: 'http://music.haitangw.net',
-    // LX Music API (获取播放URL)
-    lxmusic: 'https://lxmusicapi.onrender.com',
-    // ikun 音源 API
-    ikun: 'https://api.ikunshare.com',
-    // 海棠音乐 (haitangw.cc)
-    haitangcc: 'https://music.haitangw.cc',
-    // 段兄音乐 API (元力WY)
-    duanx: 'https://share.duanx.cn',
-    // 咪咕音乐
-    migu_m: 'https://m.music.migu.cn',
-    migu: 'https://music.migu.cn',
-    migu_cdn: 'https://cdnmusic.migu.cn',
-    // 插件托管
-    kstore: 'https://13413.kstore.vip',
-    // 插件加载
-    gitee: 'https://gitee.com',
-    github: 'https://raw.githubusercontent.com',
-    jsdelivr: 'https://fastly.jsdelivr.net',
-  }
-  
-  const target = proxyTargets[proxyType]
-  if (!target) return null
-  
-  const queryString = query ? `?${query}` : ''
-  return `${target}/${path}${queryString}`
-}
-
 /**
  * 代理媒体 URL（用于 audio/video 元素）
  * 将外部 URL 转换为本地代理 URL
@@ -706,7 +590,31 @@ const createAxiosShim = (_proxiedFetch: typeof fetch) => {
       // 对于需要原始 JSONP 的 API，保留原始文本
       // Serverless 代理直接返回原始内容，无需处理包装格式
       console.log('[axios] 保留原始 JSONP 文本用于插件处理:', requestUrl?.substring(0, 80), '长度:', text.length)
-      data = text
+      
+      // 验证 JSONP 格式是否正确
+      const jsonpPattern = /(?:^[a-zA-Z_$][a-zA-Z0-9_$]*\s*\(\s*|MusicJsonCallback\s*\(\s*|jsonpGetTagListCallback\s*\(\s*|jsonpGetPlaylistCallback\s*\(\s*|jsonCallback\s*\(\s*)({[\s\S]*})\s*\)/s
+      if (!jsonpPattern.test(text)) {
+        console.warn('[axios] JSONP 格式可能不正确，原始文本前200字符:', text.substring(0, 200))
+        // 尝试从文本中查找 JSONP 内容
+        const jsonpMatch = text.match(/(?:MusicJsonCallback|jsonpGetTagListCallback|jsonpGetPlaylistCallback|jsonCallback)\s*\(\s*({[\s\S]*})\s*\)/s)
+        if (jsonpMatch) {
+          console.log('[axios] 从文本中提取到 JSONP 内容')
+          // 保留完整的 JSONP 调用，让插件自己解析
+          data = text
+        } else {
+          // 如果找不到 JSONP，尝试直接解析 JSON
+          try {
+            const jsonData = JSON.parse(text)
+            console.log('[axios] JSONP 解析失败，尝试直接解析 JSON，数据预览:', JSON.stringify(jsonData).substring(0, 200))
+            data = jsonData
+          } catch (e) {
+            console.error('[axios] JSONP 和 JSON 解析都失败，保留原始文本')
+            data = text
+          }
+        }
+      } else {
+        data = text
+      }
     } else {
       // 先尝试解析 JSONP 响应
       let jsonpMatch = text.match(/^[a-zA-Z_$][a-zA-Z0-9_$]*\s*\(\s*({[\s\S]*})\s*\)\s*;?\s*$/)
@@ -1865,8 +1773,28 @@ const adaptMusicFreePlugin = (
           hasResult: !!result,
           musicListLength: result?.musicList?.length || 0,
           isEnd: result?.isEnd,
+          resultType: typeof result,
+          resultKeys: result ? Object.keys(result) : [],
         })
-        return (result?.musicList || []).map(mapTrack)
+        
+        // 检查返回的数据结构
+        if (!result) {
+          console.warn('[MusicFree Plugin] getMusicSheetInfo 返回 null 或 undefined')
+          return []
+        }
+        
+        if (!result.musicList) {
+          console.warn('[MusicFree Plugin] getMusicSheetInfo 返回的数据中没有 musicList 字段')
+          console.warn('[MusicFree Plugin] 返回数据:', JSON.stringify(result).substring(0, 500))
+          return []
+        }
+        
+        if (!Array.isArray(result.musicList)) {
+          console.warn('[MusicFree Plugin] getMusicSheetInfo 返回的 musicList 不是数组:', typeof result.musicList)
+          return []
+        }
+        
+        return result.musicList.map(mapTrack)
       } catch (error) {
         console.error('[MusicFree Plugin] getPlaylistSongs error:', error)
         if (error instanceof Error) {
@@ -1874,6 +1802,12 @@ const adaptMusicFreePlugin = (
             message: error.message,
             stack: error.stack?.substring(0, 500),
           })
+          
+          // 如果是 JSONP 解析错误，提供更详细的错误信息
+          if (error.message.includes('Cannot read properties of undefined')) {
+            console.error('[MusicFree Plugin] 可能是 JSONP 解析错误，返回的数据结构不正确')
+            console.error('[MusicFree Plugin] 请检查插件代码中的 importMusicSheet 函数，确保正确处理 JSONP 响应')
+          }
         }
         return []
       }
